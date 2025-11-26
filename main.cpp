@@ -201,6 +201,8 @@ String selectedSSID = "";
 String aiResponse = "";
 int scrollOffset = 0;
 int menuSelection = 0;
+int selectedIconIndex = 0;
+const int iconMenuCount = 7;
 unsigned long lastDebounce = 0;
 const unsigned long debounceDelay = 200;
 int powerMenuSelection = 0;
@@ -1529,10 +1531,6 @@ void showMainMenu() {
   }
   
   display.display();
-}
-
-void showMainMenu() {
-  showIconMenu();
 }
 
 void handleMainMenuSelect() {
