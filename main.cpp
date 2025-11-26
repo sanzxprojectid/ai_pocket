@@ -2,75 +2,44 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
-#include <Adafruit_NeoPixel.h>
-
-// NeoPixel LED settings
-#define NEOPIXEL_PIN 48
-#define NEOPIXEL_COUNT 1
-Adafruit_NeoPixel pixels(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
-
-// NeoPixel Effect State
-uint32_t neoPixelColor = 0;
-unsigned long neoPixelEffectEnd = 0;
-void triggerNeoPixelEffect(uint32_t color, int duration);
-void updateNeoPixel();
-
-// Performance settings
-#define CPU_FREQ 240
-#define I2C_FREQ 1000000
-#define TARGET_FPS 60
-#define FRAME_TIME (1000 / TARGET_FPS)
-
-// Delta Time for smooth, frame-rate independent movement
-unsigned long lastFrameMillis = 0;
-float deltaTime = 0.0;
-
-// App State Machine
-enum AppState {
-  STATE_WIFI_MENU,
-  STATE_WIFI_SCAN,
-  STATE_PASSWORD_INPUT,
-  STATE_KEYBOARD,
-  STATE_CHAT_RESPONSE,
-  STATE_MAIN_MENU,
-  STATE_API_SELECT,
-  STATE_LOADING,
-  STATE_GAME_SPACE_INVADERS,
-  STATE_GAME_SIDE_SCROLLER,
-  STATE_GAME_PONG,
-  STATE_GAME_SELECT,
-  STATE_VIDEO_PLAYER
-};
+#include <esp_now.h>
+#include <esp_wifi.h>
+#include <time.h>
 
 // OLED Display settings
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
 #define SCREEN_ADDRESS 0x3C
-#define SDA_PIN 41
-#define SCL_PIN 40
+#define SDA_PIN 20
+#define SCL_PIN 21
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Button pins
-#define BTN_UP 10
-#define BTN_DOWN 11
-#define BTN_LEFT 9
-#define BTN_RIGHT 13
-#define BTN_SELECT 14
-#define BTN_BACK 12
+#define BTN_UP 5
+#define BTN_DOWN 6
+#define BTN_LEFT 3
+#define BTN_RIGHT 4
+#define BTN_SELECT 9
+#define BTN_BACK 7  // NEW: Tombol Back
 
-// TTP223 Capacitive Touch Button pins
-#define TOUCH_LEFT 1
-#define TOUCH_RIGHT 2
+// LED Built-in
+#define LED_BUILTIN 8
+
+// Battery monitoring
+#define BATTERY_PIN 0
+#define CHARGING_PIN 1
+#define BATTERY_MAX_VOLTAGE 4.2
+#define BATTERY_MIN_VOLTAGE 3.3
+#define VOLTAGE_DIVIDER_RATIO 2.0
 
 // Dual Gemini API Keys
 const char* geminiApiKey1 = "AIzaSyAtKmbcvYB8wuHI9bqkOhufJld0oSKv7zM";
 const char* geminiApiKey2 = "AIzaSyBvXPx3SrrRRJIU9Wf6nKcuQu9XjBlSH6Y";
-const char* geminiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent";
+const char* geminiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent";
 
 Preferences preferences;
 
@@ -86,63 +55,92 @@ int selectedNetwork = 0;
 int wifiPage = 0;
 const int wifiPerPage = 4;
 
+// WiFi Auto-off settings
+unsigned long lastWiFiActivity = 0;
+const unsigned long wifiTimeout = 300000; // 5 menit
+bool wifiAutoOffEnabled = false;
+
+// Calculator
+String calcDisplay = "0";
+String calcNumber1 = "";
+char calcOperator = ' ';
+bool calcNewNumber = true;
+
 // Battery monitoring
-float batteryVoltage = 5.0;
+float batteryVoltage = 0.0;
 int batteryPercent = 100;
+bool isCharging = false;
+unsigned long lastBatteryCheck = 0;
+const unsigned long batteryCheckInterval = 2000;
 
-// Game Effects System
-#define MAX_PARTICLES 30
-struct Particle {
-  float x, y;
-  float vx, vy;
-  int life;
-  bool active;
+// Battery Guardian
+#define BATTERY_HISTORY_SIZE 60
+int batteryHistory[BATTERY_HISTORY_SIZE];
+unsigned long batteryTimestamps[BATTERY_HISTORY_SIZE];
+int batteryHistoryIndex = 0;
+bool batteryHistoryFilled = false;
+float batteryDrainRate = 0;
+int estimatedMinutesLeft = -1;
+bool batteryLeakWarning = false;
+
+// Power consumption estimation
+float wifiPowerDraw = 0;
+float displayPowerDraw = 0;
+float cpuPowerDraw = 0;
+float totalPowerDraw = 0;
+
+// System stats
+uint32_t freeHeap = 0;
+uint32_t totalHeap = 0;
+uint32_t minFreeHeap = 0;
+float cpuFreq = 0;
+float cpuTemp = 0;  // NEW: CPU Temperature
+bool lowMemoryWarning = false;
+uint32_t loopCount = 0;
+unsigned long lastLoopCount = 0;
+unsigned long lastLoopTime = 0;
+
+// Zen Mode
+bool zenModeActive = false;
+unsigned long zenModeStartTime = 0;
+int zenBreathPhase = 0;
+
+// Developer Mode
+bool devModeEnabled = false;
+unsigned long devModeDebugTimer = 0;
+
+// ESP-NOW Messaging
+#define MAX_ESP_PEERS 5
+#define MAX_MESSAGES 10
+struct Message {
+  char text[200];
+  uint8_t sender[6];
+  unsigned long timestamp;
+  bool read;
 };
-Particle particles[MAX_PARTICLES];
-int screenShake = 0;
+Message inbox[MAX_MESSAGES];
+int inboxCount = 0;
+uint8_t peerAddresses[MAX_ESP_PEERS][6];
+int peerCount = 0;
+String outgoingMessage = "";
+int selectedPeer = 0;
 
-void spawnExplosion(float x, float y, int count) {
-  for (int i = 0; i < count; i++) {
-    for (int j = 0; j < MAX_PARTICLES; j++) {
-      if (!particles[j].active) {
-        particles[j].active = true;
-        particles[j].x = x;
-        particles[j].y = y;
-        float angle = random(0, 360) * PI / 180.0;
-        float speed = random(5, 20) / 10.0;
-        particles[j].vx = cos(angle) * speed;
-        particles[j].vy = sin(angle) * speed;
-        particles[j].life = random(10, 30);
-        break;
-      }
-    }
-  }
-}
-
-void updateParticles() {
-  for (int i = 0; i < MAX_PARTICLES; i++) {
-    if (particles[i].active) {
-      particles[i].x += particles[i].vx * 60.0f * deltaTime;
-      particles[i].y += particles[i].vy * 60.0f * deltaTime;
-      particles[i].life--;
-      if (particles[i].life <= 0) particles[i].active = false;
-    }
-  }
-}
-
-void drawParticles() {
-  for (int i = 0; i < MAX_PARTICLES; i++) {
-    if (particles[i].active) {
-      if (particles[i].life % 2 == 0) { // Flicker effect
-        display.drawPixel((int)particles[i].x, (int)particles[i].y, SSD1306_WHITE);
-      }
-    }
-  }
-}
+// Breadcrumb navigation
+String breadcrumb = "";
 
 int loadingFrame = 0;
 unsigned long lastLoadingUpdate = 0;
 int selectedAPIKey = 1;
+
+// Transition effects
+int transitionFrame = 0;
+bool transitionActive = false;
+enum TransitionType { TRANS_NONE, TRANS_SLIDE_LEFT, TRANS_SLIDE_RIGHT, TRANS_FADE };
+TransitionType currentTransition = TRANS_NONE;
+
+// Display settings
+int fontSize = 1;
+int animSpeed = 100;
 
 // Keyboard layouts
 const char* keyboardLower[3][10] = {
@@ -166,151 +164,35 @@ const char* keyboardNumbers[3][10] = {
 enum KeyboardMode { MODE_LOWER, MODE_UPPER, MODE_NUMBERS };
 KeyboardMode currentKeyboardMode = MODE_LOWER;
 
-enum KeyboardContext {
-  CONTEXT_CHAT,
-  CONTEXT_WIFI_PASSWORD
+enum AppState {
+  STATE_WIFI_MENU,
+  STATE_WIFI_SCAN,
+  STATE_PASSWORD_INPUT,
+  STATE_KEYBOARD,
+  STATE_CHAT_RESPONSE,
+  STATE_MAIN_MENU,
+  STATE_CALCULATOR,
+  STATE_POWER_BASE,
+  STATE_POWER_VISUAL,
+  STATE_POWER_STATS,
+  STATE_POWER_GRAPH,
+  STATE_POWER_CONSUMPTION,
+  STATE_API_SELECT,
+  STATE_SYSTEM_INFO,
+  STATE_SETTINGS_MENU,
+  STATE_DISPLAY_SETTINGS,
+  STATE_DEVELOPER_MODE,
+  STATE_ZEN_MODE,
+  STATE_BATTERY_GUARDIAN,
+  STATE_ESP_NOW_MENU,
+  STATE_ESP_NOW_SEND,
+  STATE_ESP_NOW_INBOX,
+  STATE_ESP_NOW_PEERS,
+  STATE_LOADING
 };
-KeyboardContext keyboardContext = CONTEXT_CHAT;
-
-// Space Invaders Game State
-#define MAX_ENEMIES 15
-#define MAX_BULLETS 5
-#define MAX_ENEMY_BULLETS 10
-#define MAX_POWERUPS 3
-
-struct SpaceInvaders {
-  float playerX;
-  float playerY;
-  int playerWidth;
-  int playerHeight;
-  int lives;
-  int score;
-  int level;
-  bool gameOver;
-  int weaponType; // 0=single, 1=double, 2=triple
-  int shieldTime;
-  
-  struct Enemy {
-    float x, y;
-    int width, height;
-    bool active;
-    int type; // 0=basic, 1=fast, 2=tank
-    int health;
-  };
-  Enemy enemies[MAX_ENEMIES];
-  
-  struct Bullet {
-    float x, y;
-    bool active;
-  };
-  Bullet bullets[MAX_BULLETS];
-  Bullet enemyBullets[MAX_ENEMY_BULLETS];
-  
-  struct PowerUp {
-    float x, y;
-    int type; // 0=weapon, 1=shield, 2=life
-    bool active;
-  };
-  PowerUp powerups[MAX_POWERUPS];
-  
-  float enemyDirection; // 1=right, -1=left
-  unsigned long lastEnemyMove;
-  unsigned long lastEnemyShoot;
-  unsigned long lastSpawn;
-  bool bossActive;
-  float bossX, bossY;
-  int bossHealth;
-};
-SpaceInvaders invaders;
-
-// Side Scroller Shooter Game State
-#define MAX_OBSTACLES 8
-#define MAX_SCROLLER_BULLETS 8
-#define MAX_SCROLLER_ENEMIES 6
-
-struct SideScroller {
-  float playerX, playerY;
-  int playerWidth, playerHeight;
-  int lives;
-  int score;
-  int level;
-  bool gameOver;
-  int weaponLevel; // 1-5
-  int specialCharge; // 0-100
-  bool shieldActive;
-  
-  struct Obstacle {
-    float x, y;
-    int width, height;
-    bool active;
-    float scrollSpeed;
-  };
-  Obstacle obstacles[MAX_OBSTACLES];
-  
-  struct ScrollerBullet {
-    float x, y;
-    int dirX, dirY; // -1, 0, or 1
-    bool active;
-    int damage;
-  };
-  ScrollerBullet bullets[MAX_SCROLLER_BULLETS];
-  
-  struct ScrollerEnemy {
-    float x, y;
-    int width, height;
-    bool active;
-    int health;
-    int type; // 0=basic, 1=shooter, 2=kamikaze
-    int dirY;
-  };
-  ScrollerEnemy enemies[MAX_SCROLLER_ENEMIES];
-  
-  struct ScrollerEnemyBullet {
-    float x, y;
-    bool active;
-  };
-  ScrollerEnemyBullet enemyBullets[MAX_OBSTACLES];
-  
-  unsigned long lastMove;
-  unsigned long lastShoot;
-  unsigned long lastEnemySpawn;
-  unsigned long lastObstacleSpawn;
-  int scrollOffset;
-};
-SideScroller scroller;
-
-// Pong Game State
-struct Pong {
-  float ballX, ballY;
-  float ballDirX, ballDirY;
-  float ballSpeed;
-  float paddle1Y, paddle2Y;
-  int paddleWidth, paddleHeight;
-  int score1, score2;
-  bool gameOver;
-  bool aiMode; // true = vs AI, false = 2 player
-  int difficulty; // 1-3
-};
-Pong pong;
-unsigned long pongResetTimer = 0;
-bool pongResetting = false;
 
 AppState currentState = STATE_MAIN_MENU;
 AppState previousState = STATE_MAIN_MENU;
-
-// UI Transition System
-enum TransitionState { TRANSITION_NONE, TRANSITION_OUT, TRANSITION_IN };
-TransitionState transitionState = TRANSITION_NONE;
-AppState transitionTargetState;
-float transitionProgress = 0.0; // 0.0 to 1.0
-const float transitionSpeed = 2.5f;
-
-// Main Menu Animation Variables
-float menuScrollY = 0;
-float menuTargetScrollY = 0;
-int mainMenuSelection = 0;
-float menuTextScrollX = 0;
-unsigned long lastMenuTextScrollTime = 0;
 
 int cursorX = 0, cursorY = 0;
 String userInput = "";
@@ -320,10 +202,9 @@ String aiResponse = "";
 int scrollOffset = 0;
 int menuSelection = 0;
 unsigned long lastDebounce = 0;
-const unsigned long debounceDelay = 150;
-
-unsigned long lastGameUpdate = 0;
-const int gameUpdateInterval = FRAME_TIME;
+const unsigned long debounceDelay = 200;
+int powerMenuSelection = 0;
+int settingsMenuSelection = 0;
 
 // Icons (8x8 pixel bitmaps)
 const unsigned char ICON_WIFI[] PROGMEM = {
@@ -334,116 +215,95 @@ const unsigned char ICON_CHAT[] PROGMEM = {
   0x7E, 0xFF, 0xC3, 0xC3, 0xC3, 0xFF, 0x18, 0x00
 };
 
-const unsigned char ICON_GAME[] PROGMEM = {
+const unsigned char ICON_CALC[] PROGMEM = {
+  0xFF, 0x81, 0x99, 0x81, 0x99, 0x81, 0xFF, 0x00
+};
+
+const unsigned char ICON_POWER[] PROGMEM = {
+  0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0x7E, 0x3C, 0x18
+};
+
+const unsigned char ICON_SETTINGS[] PROGMEM = {
+  0x10, 0x38, 0x7C, 0xFE, 0x7C, 0x38, 0x10, 0x00
+};
+
+const unsigned char ICON_ZEN[] PROGMEM = {
   0x3C, 0x42, 0x99, 0xA5, 0xA5, 0x99, 0x42, 0x3C
 };
 
-const unsigned char ICON_VIDEO[] PROGMEM = {
-  0x7E, 0x81, 0x81, 0xBD, 0xBD, 0x81, 0x81, 0x7E
+const unsigned char ICON_MESSAGE[] PROGMEM = {
+  0x7E, 0x81, 0xA5, 0x81, 0xBD, 0x81, 0x7E, 0x00
 };
 
-// Video Player Data
-// ==========================================
-// PASTE YOUR VIDEO FRAME ARRAY HERE
-// Format: const unsigned char frame1[] PROGMEM = { ... };
-//         const unsigned char* videoFrames[] = { frame1, frame2, ... };
-// ==========================================
-const unsigned char* videoFrames[] = { NULL }; // Placeholder
-int videoTotalFrames = 0;
-int videoCurrentFrame = 0;
-unsigned long lastVideoFrameTime = 0;
-const int videoFrameDelay = 70; // 25 FPS
+const unsigned char ICON_DEV[] PROGMEM = {
+  0x08, 0x14, 0x22, 0x41, 0x41, 0x22, 0x14, 0x08
+};
 
 // Forward declarations
-void showMainMenu(int x_offset = 0);
-void showWiFiMenu(int x_offset = 0);
-void showAPISelect(int x_offset = 0);
-void showGameSelect(int x_offset = 0);
-void showLoadingAnimation(int x_offset = 0);
+void showMainMenu();
+void showIconMenu();
+void drawScaledIcon(int x, int y, const unsigned char* icon, int size);
+void showWiFiMenu();
+void showCalculator();
+void showPowerBase();
+void showPowerVisual();
+void showPowerStats();
+void showPowerGraph();
+void showPowerConsumption();
+void showAPISelect();
+void showSystemInfo();
+void showSettingsMenu();
+void showDisplaySettings();
+void showDeveloperMode();
+void showZenMode();
+void showBatteryGuardian();
+void showESPNowMenu();
+void showESPNowSend();
+void showESPNowInbox();
+void showESPNowPeers();
+void showLoadingAnimation();
 void showProgressBar(String title, int percent);
-void displayWiFiNetworks(int x_offset = 0);
-void drawKeyboard(int x_offset = 0);
+void displayWiFiNetworks();
+void drawKeyboard();
 void handleMainMenuSelect();
 void handleWiFiMenuSelect();
+void handlePowerBaseSelect();
 void handleAPISelectSelect();
-void handleGameSelectSelect();
+void handleSettingsMenuSelect();
 void handleKeyPress();
 void handlePasswordKeyPress();
+void handleCalculatorInput();
 void handleBackButton();
 void connectToWiFi(String ssid, String password);
 void scanWiFiNetworks();
-void displayResponse(int x_offset);
+void displayResponse();
 void showStatus(String message, int delayMs);
 void forgetNetwork();
-void refreshCurrentScreen() {
-  int x_offset = 0;
-  if (transitionState == TRANSITION_OUT) {
-    x_offset = -SCREEN_WIDTH * transitionProgress;
-  } else if (transitionState == TRANSITION_IN) {
-    x_offset = SCREEN_WIDTH * (1.0 - transitionProgress);
-  }
-
-  // We don't draw UI for game states, they handle their own display updates
-  switch(currentState) {
-    case STATE_MAIN_MENU: showMainMenu(x_offset); break;
-    case STATE_WIFI_MENU: showWiFiMenu(x_offset); break;
-    case STATE_WIFI_SCAN: displayWiFiNetworks(x_offset); break;
-    case STATE_API_SELECT: showAPISelect(x_offset); break;
-    case STATE_GAME_SELECT: showGameSelect(x_offset); break;
-    case STATE_LOADING: showLoadingAnimation(x_offset); break;
-    case STATE_KEYBOARD: drawKeyboard(x_offset); break;
-    case STATE_PASSWORD_INPUT: drawKeyboard(x_offset); break;
-    case STATE_CHAT_RESPONSE: displayResponse(x_offset); break;
-    // Game states handle their own drawing, so no call here
-    case STATE_GAME_SPACE_INVADERS:
-    case STATE_GAME_SIDE_SCROLLER:
-    case STATE_GAME_PONG:
-    case STATE_VIDEO_PLAYER:
-      break;
-    default: showMainMenu(x_offset); break;
-  }
-}
+void refreshCurrentScreen();
+void calculateResult();
+void resetCalculator();
+void updateBatteryLevel();
+void updateBatteryHistory();
+void updateSystemStats();
+void updatePowerConsumption();
+void checkBatteryHealth();
 void drawBatteryIndicator();
 void drawWiFiSignalBars();
+void drawChargingPlug();
+void drawBreadcrumb();
 void drawIcon(int x, int y, const unsigned char* icon);
+void startTransition(TransitionType type);
 void sendToGemini();
+void checkWiFiTimeout();
+void enterZenMode();
+void exitZenMode();
 const char* getCurrentKey();
 void toggleKeyboardMode();
-
-// UI Transition Function
-void changeState(AppState newState) {
-  if (transitionState == TRANSITION_NONE && currentState != newState) {
-    transitionTargetState = newState;
-    transitionState = TRANSITION_OUT;
-    transitionProgress = 0.0f;
-    previousState = currentState; // Store where we came from
-  }
-}
-
-// Game functions
-void initSpaceInvaders();
-void updateSpaceInvaders();
-void drawSpaceInvaders();
-void handleSpaceInvadersInput();
-
-void initSideScroller();
-void updateSideScroller();
-void drawSideScroller();
-void handleSideScrollerInput();
-
-void initPong();
-void updatePong();
-void drawPong();
-void handlePongInput();
-
-void drawVideoPlayer();
-
-// Button handlers
-void handleUp();
-void handleDown();
-void handleLeft();
-void handleRight();
-void handleSelect();
+void onESPNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *data, int len);
+void onESPNowDataSent(const uint8_t *mac, esp_now_send_status_t status);
+void initESPNow();
+void sendESPNowMessage(String message, uint8_t* targetMac);
+void addPeer(uint8_t* macAddr);
 
 // LED Patterns
 void ledHeartbeat() {
@@ -451,8 +311,25 @@ void ledHeartbeat() {
   digitalWrite(LED_BUILTIN, (beat < 2 || beat == 4));
 }
 
+void ledPulse() {
+  int pulse = (millis() / 10) % 512;
+  if (pulse > 255) pulse = 511 - pulse;
+  analogWrite(LED_BUILTIN, pulse);
+}
+
 void ledBlink(int speed) {
   digitalWrite(LED_BUILTIN, (millis() / speed) % 2);
+}
+
+void ledBreathing() {
+  int breath = (millis() / 20) % 512;
+  if (breath > 255) breath = 511 - breath;
+  analogWrite(LED_BUILTIN, breath);
+}
+
+void ledZenMode() {
+  // Sangat lambat: 1x per menit (60000ms)
+  digitalWrite(LED_BUILTIN, (millis() / 60000) % 2);
 }
 
 void ledSuccess() {
@@ -482,35 +359,41 @@ void ledQuickFlash() {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-
-  // High Performance Setup for ESP32-S3 N16R8
-  setCpuFrequencyMhz(CPU_FREQ);
-  psramInit();
   
-  Serial.println("\n=== ESP32-S3 Gaming Edition v1.0 ===");
-  Serial.printf("CPU Freq: %d MHz\n", getCpuFrequencyMhz());
-  Serial.printf("PSRAM Size: %d KB\n", ESP.getPsramSize() / 1024);
+  Serial.println("\n=== ESP32-C3 Ultra Edition v4.0 ===");
+  Serial.println("Advanced Features Enabled");
   
   preferences.begin("wifi-creds", false);
+  preferences.begin("settings", false);
   Wire.begin(SDA_PIN, SCL_PIN);
-  Wire.setClock(I2C_FREQ); // Fast I2C for smoother display updates
   
   pinMode(BTN_UP, INPUT_PULLUP);
   pinMode(BTN_DOWN, INPUT_PULLUP);
   pinMode(BTN_LEFT, INPUT_PULLUP);
   pinMode(BTN_RIGHT, INPUT_PULLUP);
   pinMode(BTN_SELECT, INPUT_PULLUP);
-  pinMode(BTN_BACK, INPUT_PULLUP);
-  
-  pinMode(TOUCH_LEFT, INPUT);
-  pinMode(TOUCH_RIGHT, INPUT);
+  pinMode(BTN_BACK, INPUT_PULLUP);  // NEW
   
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
-
-  pixels.begin();
-  pixels.setPixelColor(0, pixels.Color(0, 0, 0));
-  pixels.show();
+  
+  pinMode(BATTERY_PIN, INPUT);
+  pinMode(CHARGING_PIN, INPUT);
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+  updateBatteryLevel();
+  
+  // Initialize battery history
+  for (int i = 0; i < BATTERY_HISTORY_SIZE; i++) {
+    batteryHistory[i] = batteryPercent;
+    batteryTimestamps[i] = millis();
+  }
+  
+  // Load settings
+  wifiAutoOffEnabled = preferences.getBool("wifiAutoOff", false);
+  fontSize = preferences.getInt("fontSize", 1);
+  animSpeed = preferences.getInt("animSpeed", 100);
+  devModeEnabled = preferences.getBool("devMode", false);
   
   if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
     Serial.println(F("SSD1306 allocation failed"));
@@ -524,10 +407,12 @@ void setup() {
   
   ledSuccess();
   
-  preferences.begin("wifi-creds", true);
+  // Initialize ESP-NOW
+  initESPNow();
+  
+  // Auto-connect WiFi
   String savedSSID = preferences.getString("ssid", "");
   String savedPassword = preferences.getString("password", "");
-  preferences.end();
   
   if (savedSSID.length() > 0) {
     showProgressBar("WiFi Connect", 0);
@@ -545,141 +430,150 @@ void setup() {
       ledSuccess();
       showProgressBar("Connected!", 100);
       delay(1000);
+      lastWiFiActivity = millis();
     } else {
       ledError();
-      showStatus("Connection failed", 2000);
+      showStatus("Connection failed\nOpening WiFi menu", 2000);
+      currentState = STATE_WIFI_MENU;
     }
+  } else {
+    currentState = STATE_WIFI_MENU;
   }
   
+  updateSystemStats();
   showMainMenu();
-}
-
-void triggerNeoPixelEffect(uint32_t color, int duration) {
-  neoPixelColor = color;
-  pixels.setPixelColor(0, neoPixelColor);
-  pixels.show();
-  neoPixelEffectEnd = millis() + duration;
-}
-
-void updateNeoPixel() {
-  if (neoPixelEffectEnd > 0 && millis() > neoPixelEffectEnd) {
-    neoPixelColor = 0;
-    pixels.setPixelColor(0, neoPixelColor);
-    pixels.show();
-    neoPixelEffectEnd = 0;
-  }
 }
 
 void loop() {
   unsigned long currentMillis = millis();
   
-  updateNeoPixel();
-
-  // LED Patterns
-  switch(currentState) {
-    case STATE_LOADING:
-      ledBlink(100);
-      break;
-    case STATE_CHAT_RESPONSE:
-      ledBlink(300);
-      break;
-    case STATE_GAME_SPACE_INVADERS:
-    case STATE_GAME_SIDE_SCROLLER:
-    case STATE_GAME_PONG:
-      {
-        int blink = (millis() / 100) % 3;
-        digitalWrite(LED_BUILTIN, blink < 2);
-      }
-      break;
-    case STATE_MAIN_MENU:
-    default:
-      ledHeartbeat();
-      break;
+  loopCount++;
+  
+  // Zen Mode Logic
+  if (zenModeActive) {
+    ledZenMode();
+    
+    // Update zen breath animation
+    if (currentMillis % 4000 < 2000) {
+      zenBreathPhase = map(currentMillis % 2000, 0, 2000, 0, 100);
+    } else {
+      zenBreathPhase = map(currentMillis % 2000, 0, 2000, 100, 0);
+    }
+    
+    showZenMode();
+    
+    // Check for exit button
+    if (digitalRead(BTN_BACK) == LOW || digitalRead(BTN_SELECT) == LOW) {
+      delay(200);
+      exitZenMode();
+    }
+    return;
+  }
+  
+  // Battery monitoring
+  if (currentMillis - lastBatteryCheck > batteryCheckInterval) {
+    updateBatteryLevel();
+    updateBatteryHistory();
+    checkBatteryHealth();
+    updatePowerConsumption();
+    lastBatteryCheck = currentMillis;
+    
+    if (currentState != STATE_LOADING) {
+      refreshCurrentScreen();
+    }
+  }
+  
+  // System stats update
+  if (currentMillis - lastLoopTime > 1000) {
+    lastLoopCount = loopCount;
+    loopCount = 0;
+    lastLoopTime = currentMillis;
+    updateSystemStats();
+  }
+  
+  // WiFi timeout check
+  if (wifiAutoOffEnabled && WiFi.status() == WL_CONNECTED) {
+    checkWiFiTimeout();
+  }
+  
+  // Developer Mode Debug
+  if (devModeEnabled && currentState == STATE_DEVELOPER_MODE) {
+    if (currentMillis - devModeDebugTimer > 1000) {
+      devModeDebugTimer = currentMillis;
+      showDeveloperMode();
+    }
+  }
+  
+  // Interactive LED Patterns
+  if (!zenModeActive) {
+    switch(currentState) {
+      case STATE_LOADING:
+        ledPulse();
+        break;
+      case STATE_CHAT_RESPONSE:
+        ledBreathing();
+        break;
+      case STATE_CALCULATOR:
+        ledBlink(500);
+        break;
+      case STATE_POWER_BASE:
+      case STATE_POWER_VISUAL:
+      case STATE_POWER_STATS:
+      case STATE_POWER_GRAPH:
+      case STATE_POWER_CONSUMPTION:
+        if (isCharging) {
+          ledPulse();
+        } else if (batteryPercent < 20) {
+          ledBlink(250);
+        } else {
+          ledBreathing();
+        }
+        break;
+      case STATE_SYSTEM_INFO:
+        {
+          int rainbow = (millis() / 100) % 30;
+          digitalWrite(LED_BUILTIN, rainbow < 10 || (rainbow > 14 && rainbow < 20));
+        }
+        break;
+      case STATE_BATTERY_GUARDIAN:
+        if (batteryLeakWarning) {
+          ledBlink(150);
+        } else {
+          ledBreathing();
+        }
+        break;
+      case STATE_ESP_NOW_MENU:
+      case STATE_ESP_NOW_SEND:
+      case STATE_ESP_NOW_INBOX:
+        {
+          int pattern = (millis() / 200) % 6;
+          digitalWrite(LED_BUILTIN, pattern < 3);
+        }
+        break;
+      case STATE_DEVELOPER_MODE:
+        {
+          int devPattern = (millis() / 100) % 10;
+          digitalWrite(LED_BUILTIN, devPattern < 2 || (devPattern > 4 && devPattern < 7));
+        }
+        break;
+      case STATE_MAIN_MENU:
+      default:
+        ledHeartbeat();
+        break;
+    }
   }
   
   // Loading animation
   if (currentState == STATE_LOADING) {
-    if (currentMillis - lastLoadingUpdate > 100) {
+    if (currentMillis - lastLoadingUpdate > animSpeed) {
       lastLoadingUpdate = currentMillis;
       loadingFrame = (loadingFrame + 1) % 8;
       showLoadingAnimation();
     }
   }
   
-  // Game updates
-  if (currentMillis - lastGameUpdate > gameUpdateInterval) {
-    // Calculate Delta Time
-    if (lastFrameMillis == 0) lastFrameMillis = currentMillis;
-    deltaTime = (currentMillis - lastFrameMillis) / 1000.0f;
-    lastFrameMillis = currentMillis;
-
-    // Poll Game Inputs (Smooth Movement)
-    if (currentState == STATE_GAME_SPACE_INVADERS) handleSpaceInvadersInput();
-    else if (currentState == STATE_GAME_SIDE_SCROLLER) handleSideScrollerInput();
-    else if (currentState == STATE_GAME_PONG) handlePongInput();
-
-    switch(currentState) {
-      case STATE_GAME_SPACE_INVADERS:
-        updateSpaceInvaders();
-        drawSpaceInvaders();
-        break;
-      case STATE_GAME_SIDE_SCROLLER:
-        updateSideScroller();
-        drawSideScroller();
-        break;
-      case STATE_GAME_PONG:
-        updatePong();
-        drawPong();
-        break;
-    }
-    lastGameUpdate = currentMillis;
-  }
-
-  if (currentState == STATE_VIDEO_PLAYER) {
-    drawVideoPlayer();
-  }
-
-  // UI Transition Logic
-  if (transitionState != TRANSITION_NONE) {
-    transitionProgress += transitionSpeed * deltaTime;
-    if (transitionProgress >= 1.0f) {
-      transitionProgress = 1.0f;
-      if (transitionState == TRANSITION_OUT) {
-        currentState = transitionTargetState;
-        transitionState = TRANSITION_IN;
-        transitionProgress = 0.0f;
-
-        // If returning to the main menu, restore the selection. Otherwise, reset it.
-        if (transitionTargetState == STATE_MAIN_MENU) {
-          menuSelection = mainMenuSelection;
-          menuTargetScrollY = mainMenuSelection * 22;
-          menuScrollY = menuTargetScrollY;
-        } else {
-          menuSelection = 0;
-          menuScrollY = 0;
-          menuTargetScrollY = 0;
-        }
-      } else {
-        transitionState = TRANSITION_NONE;
-      }
-    }
-  }
-
-  // Draw current screen with transition offset
-  // We call this every frame now, not just on input
-  refreshCurrentScreen();
-
-  // Main Menu Animation (Only if not transitioning)
-  if (currentState == STATE_MAIN_MENU && transitionState == TRANSITION_NONE) {
-    if (abs(menuScrollY - menuTargetScrollY) > 0.1) {
-      menuScrollY += (menuTargetScrollY - menuScrollY) * 0.3;
-    } else if (menuScrollY != menuTargetScrollY) {
-      menuScrollY = menuTargetScrollY;
-    }
-  }
-  
-  // Button handling (only if not transitioning)
-  if (transitionState == TRANSITION_NONE && currentMillis - lastDebounce > debounceDelay) {
+  // Button handling
+  if (currentMillis - lastDebounce > debounceDelay) {
     bool buttonPressed = false;
     
     if (digitalRead(BTN_UP) == LOW) {
@@ -707,1033 +601,1289 @@ void loop() {
       buttonPressed = true;
     }
     
-    // Touch buttons
-    if (digitalRead(TOUCH_LEFT) == HIGH) {
-      handleLeft();
-      if (currentState == STATE_GAME_SPACE_INVADERS || 
-          currentState == STATE_GAME_SIDE_SCROLLER) {
-        handleSelect(); // Also shoot
-      }
-      buttonPressed = true;
-    }
-    if (digitalRead(TOUCH_RIGHT) == HIGH) {
-      handleRight();
-      buttonPressed = true;
-    }
-    
     if (buttonPressed) {
       lastDebounce = currentMillis;
       ledQuickFlash();
-    }
-  }
-}
-
-// ========== SPACE INVADERS GAME ==========
-
-void initSpaceInvaders() {
-  invaders.playerX = SCREEN_WIDTH / 2 - 4;
-  invaders.playerY = SCREEN_HEIGHT - 10;
-  invaders.playerWidth = 8;
-  invaders.playerHeight = 6;
-  invaders.lives = 3;
-  invaders.score = 0;
-  invaders.level = 1;
-  invaders.gameOver = false;
-  invaders.weaponType = 0;
-  invaders.shieldTime = 0;
-  invaders.enemyDirection = 1;
-  invaders.lastEnemyMove = 0;
-  invaders.lastEnemyShoot = 0;
-  invaders.lastSpawn = 0;
-  invaders.bossActive = false;
-  
-  // Initialize enemies
-  for (int i = 0; i < MAX_ENEMIES; i++) {
-    invaders.enemies[i].active = false;
-  }
-  
-  // Spawn initial wave
-  for (int i = 0; i < 5; i++) {
-    invaders.enemies[i].active = true;
-    invaders.enemies[i].x = 10 + i * 20;
-    invaders.enemies[i].y = 15;
-    invaders.enemies[i].width = 8;
-    invaders.enemies[i].height = 6;
-    invaders.enemies[i].type = random(0, 3);
-    invaders.enemies[i].health = invaders.enemies[i].type + 1;
-  }
-  
-  // Clear bullets
-  for (int i = 0; i < MAX_BULLETS; i++) {
-    invaders.bullets[i].active = false;
-  }
-  for (int i = 0; i < MAX_ENEMY_BULLETS; i++) {
-    invaders.enemyBullets[i].active = false;
-  }
-  for (int i = 0; i < MAX_POWERUPS; i++) {
-    invaders.powerups[i].active = false;
-  }
-}
-
-void updateSpaceInvaders() {
-  if (invaders.gameOver) return;
-  
-  unsigned long now = millis();
-  
-  updateParticles();
-  if (screenShake > 0) screenShake--;
-
-  // Decrease shield
-  if (invaders.shieldTime > 0) invaders.shieldTime--;
-  
-  // Smooth Enemy Movement
-  bool hitEdge = false;
-  float enemySpeed = 5.0f + (invaders.level * 2.0f); // Speed in pixels per second
-
-  for (int i = 0; i < MAX_ENEMIES; i++) {
-    if (invaders.enemies[i].active) {
-      invaders.enemies[i].x += invaders.enemyDirection * enemySpeed * deltaTime;
-
-      if ((invaders.enemyDirection > 0 && invaders.enemies[i].x >= SCREEN_WIDTH - 8) ||
-          (invaders.enemyDirection < 0 && invaders.enemies[i].x <= 0)) {
-        hitEdge = true;
-      }
-    }
-  }
-
-  if (hitEdge) {
-    invaders.enemyDirection *= -1;
-    for (int i = 0; i < MAX_ENEMIES; i++) {
-      if (invaders.enemies[i].active) {
-        invaders.enemies[i].y += 4; // Step down
-        // Check if enemy reached player
-        if (invaders.enemies[i].y >= invaders.playerY) {
-          invaders.lives--;
-          triggerNeoPixelEffect(pixels.Color(255, 0, 0), 200); // Red flash
-          invaders.enemies[i].active = false; // Enemy disappears
-          screenShake = 10;
-          if (invaders.lives <= 0) {
-            invaders.gameOver = true;
-            triggerNeoPixelEffect(pixels.Color(100, 0, 0), 1000); // Dim red for game over
-          }
-        }
-      }
-    }
-  }
-  
-  // Enemy shooting
-  if (now - invaders.lastEnemyShoot > 1000) {
-    for (int i = 0; i < MAX_ENEMIES; i++) {
-      if (invaders.enemies[i].active && random(0, 5) == 0) {
-        // Find empty bullet slot
-        for (int j = 0; j < MAX_ENEMY_BULLETS; j++) {
-          if (!invaders.enemyBullets[j].active) {
-            invaders.enemyBullets[j].x = invaders.enemies[i].x + 4;
-            invaders.enemyBullets[j].y = invaders.enemies[i].y + 6;
-            invaders.enemyBullets[j].active = true;
-            break;
-          }
-        }
-      }
-    }
-    invaders.lastEnemyShoot = now;
-  }
-  
-  // Move bullets
-  float bulletSpeed = 150.0f;
-  float enemyBulletSpeed = 90.0f;
-  for (int i = 0; i < MAX_BULLETS; i++) {
-    if (invaders.bullets[i].active) {
-      invaders.bullets[i].y -= bulletSpeed * deltaTime;
-      if (invaders.bullets[i].y < 0) {
-        invaders.bullets[i].active = false;
-      }
-    }
-  }
-  
-  for (int i = 0; i < MAX_ENEMY_BULLETS; i++) {
-    if (invaders.enemyBullets[i].active) {
-      invaders.enemyBullets[i].y += enemyBulletSpeed * deltaTime;
-      if (invaders.enemyBullets[i].y > SCREEN_HEIGHT) {
-        invaders.enemyBullets[i].active = false;
-      }
-    }
-  }
-  
-  // Move powerups
-  float powerupSpeed = 60.0f;
-  for (int i = 0; i < MAX_POWERUPS; i++) {
-    if (invaders.powerups[i].active) {
-      invaders.powerups[i].y += powerupSpeed * deltaTime;
-      if (invaders.powerups[i].y > SCREEN_HEIGHT) {
-        invaders.powerups[i].active = false;
-      }
-    }
-  }
-  
-  // Collision detection - player bullets vs enemies
-  for (int i = 0; i < MAX_BULLETS; i++) {
-    if (invaders.bullets[i].active) {
-      for (int j = 0; j < MAX_ENEMIES; j++) {
-        if (invaders.enemies[j].active) {
-          if (invaders.bullets[i].x >= invaders.enemies[j].x &&
-              invaders.bullets[i].x <= invaders.enemies[j].x + invaders.enemies[j].width &&
-              invaders.bullets[i].y >= invaders.enemies[j].y &&
-              invaders.bullets[i].y <= invaders.enemies[j].y + invaders.enemies[j].height) {
-            
-            invaders.bullets[i].active = false;
-            invaders.enemies[j].health--;
-            
-            if (invaders.enemies[j].health <= 0) {
-              invaders.enemies[j].active = false;
-              invaders.score += (invaders.enemies[j].type + 1) * 10;
-              
-              spawnExplosion(invaders.enemies[j].x + 4, invaders.enemies[j].y + 3, 5);
-              triggerNeoPixelEffect(pixels.Color(255, 165, 0), 100); // Orange flash
-              screenShake = 2;
-
-              // Spawn powerup
-              if (random(0, 10) < 3) {
-                for (int k = 0; k < MAX_POWERUPS; k++) {
-                  if (!invaders.powerups[k].active) {
-                    invaders.powerups[k].x = invaders.enemies[j].x;
-                    invaders.powerups[k].y = invaders.enemies[j].y;
-                    invaders.powerups[k].type = random(0, 3);
-                    invaders.powerups[k].active = true;
-                    break;
-                  }
-                }
-              }
-            }
-            break;
-          }
-        }
-      }
-    }
-  }
-  
-  // Collision - enemy bullets vs player
-  if (invaders.shieldTime == 0) {
-    for (int i = 0; i < MAX_ENEMY_BULLETS; i++) {
-      if (invaders.enemyBullets[i].active) {
-        if (invaders.enemyBullets[i].x >= invaders.playerX &&
-            invaders.enemyBullets[i].x <= invaders.playerX + invaders.playerWidth &&
-            invaders.enemyBullets[i].y >= invaders.playerY &&
-            invaders.enemyBullets[i].y <= invaders.playerY + invaders.playerHeight) {
-          
-          invaders.enemyBullets[i].active = false;
-          invaders.lives--;
-          triggerNeoPixelEffect(pixels.Color(255, 0, 0), 200); // Red flash
-          screenShake = 6;
-          
-          if (invaders.lives <= 0) {
-            invaders.gameOver = true;
-            triggerNeoPixelEffect(pixels.Color(100, 0, 0), 1000); // Dim red for game over
-          }
-        }
-      }
-    }
-  }
-  
-  // Collision - powerups vs player
-  for (int i = 0; i < MAX_POWERUPS; i++) {
-    if (invaders.powerups[i].active) {
-      if (abs(invaders.powerups[i].x - invaders.playerX) < 8 &&
-          abs(invaders.powerups[i].y - invaders.playerY) < 8) {
-        
-        invaders.powerups[i].active = false;
-        
-        switch(invaders.powerups[i].type) {
-          case 0: // Weapon upgrade
-            invaders.weaponType = min(invaders.weaponType + 1, 2);
-            break;
-          case 1: // Shield
-            invaders.shieldTime = 300;
-            break;
-          case 2: // Extra life
-            invaders.lives++;
-            break;
-        }
-      }
-    }
-  }
-  
-  // Spawn new wave
-  bool allDead = true;
-  for (int i = 0; i < MAX_ENEMIES; i++) {
-    if (invaders.enemies[i].active) {
-      allDead = false;
-      break;
-    }
-  }
-  
-  if (allDead && now - invaders.lastSpawn > 2000) {
-    invaders.level++;
-    int numEnemies = min(5 + invaders.level, MAX_ENEMIES);
-    
-    for (int i = 0; i < numEnemies; i++) {
-      invaders.enemies[i].active = true;
-      invaders.enemies[i].x = 10 + (i % 5) * 20;
-      invaders.enemies[i].y = 15 + (i / 5) * 10;
-      invaders.enemies[i].width = 8;
-      invaders.enemies[i].height = 6;
-      invaders.enemies[i].type = random(0, 3);
-      invaders.enemies[i].health = invaders.enemies[i].type + 1;
-    }
-    
-    invaders.lastSpawn = now;
-  }
-}
-
-void drawSpaceInvaders() {
-  display.clearDisplay();
-
-  // Apply Screen Shake
-  int shakeX = 0;
-  int shakeY = 0;
-  if (screenShake > 0) {
-    shakeX = random(-screenShake, screenShake + 1);
-    shakeY = random(-screenShake, screenShake + 1);
-  }
-
-  drawBatteryIndicator();
-  
-  // Draw HUD (Fixed position, no shake)
-  display.setTextSize(1);
-  display.setCursor(2, 2);
-  display.print("L:");
-  display.print(invaders.lives);
-  display.setCursor(40, 2);
-  display.print("S:");
-  display.print(invaders.score);
-  display.setCursor(90, 2);
-  display.print("Lv:");
-  display.print(invaders.level);
-  
-  display.drawLine(0, 10, SCREEN_WIDTH, 10, SSD1306_WHITE);
-  
-  // Draw player (Neon Style)
-  if (invaders.shieldTime > 0 && (millis() / 100) % 2 == 0) {
-    display.drawCircle(invaders.playerX + 4 + shakeX, invaders.playerY + 3 + shakeY, 8, SSD1306_WHITE);
-  }
-  display.drawTriangle(
-    invaders.playerX + 4 + shakeX, invaders.playerY + shakeY,
-    invaders.playerX + shakeX, invaders.playerY + 6 + shakeY,
-    invaders.playerX + 8 + shakeX, invaders.playerY + 6 + shakeY,
-    SSD1306_WHITE
-  );
-  
-  // Draw enemies (Neon Style)
-  for (int i = 0; i < MAX_ENEMIES; i++) {
-    if (invaders.enemies[i].active) {
-      // Different shapes for different types
-      switch(invaders.enemies[i].type) {
-        case 0: // Basic
-          display.drawRect(invaders.enemies[i].x + shakeX, invaders.enemies[i].y + shakeY, 8, 6, SSD1306_WHITE);
-          break;
-        case 1: // Fast
-          display.drawTriangle(
-            invaders.enemies[i].x + 4 + shakeX, invaders.enemies[i].y + shakeY,
-            invaders.enemies[i].x + shakeX, invaders.enemies[i].y + 6 + shakeY,
-            invaders.enemies[i].x + 8 + shakeX, invaders.enemies[i].y + 6 + shakeY,
-            SSD1306_WHITE
-          );
-          break;
-        case 2: // Tank
-          display.drawRect(invaders.enemies[i].x + shakeX, invaders.enemies[i].y + shakeY, 8, 8, SSD1306_WHITE);
-          display.drawRect(invaders.enemies[i].x + 2 + shakeX, invaders.enemies[i].y + 2 + shakeY, 4, 4, SSD1306_WHITE);
-          break;
-      }
-    }
-  }
-  
-  // Draw bullets
-  for (int i = 0; i < MAX_BULLETS; i++) {
-    if (invaders.bullets[i].active) {
-      display.drawLine(invaders.bullets[i].x + shakeX, invaders.bullets[i].y + shakeY,
-                      invaders.bullets[i].x + shakeX, invaders.bullets[i].y + 3 + shakeY, SSD1306_WHITE);
-    }
-  }
-  
-  for (int i = 0; i < MAX_ENEMY_BULLETS; i++) {
-    if (invaders.enemyBullets[i].active) {
-      display.drawLine(invaders.enemyBullets[i].x + shakeX, invaders.enemyBullets[i].y + shakeY,
-                      invaders.enemyBullets[i].x + shakeX, invaders.enemyBullets[i].y - 3 + shakeY, SSD1306_WHITE);
-    }
-  }
-  
-  // Draw powerups
-  for (int i = 0; i < MAX_POWERUPS; i++) {
-    if (invaders.powerups[i].active) {
-      switch(invaders.powerups[i].type) {
-        case 0: // Weapon
-          display.drawCircle(invaders.powerups[i].x + shakeX, invaders.powerups[i].y + shakeY, 3, SSD1306_WHITE);
-          display.drawPixel(invaders.powerups[i].x + shakeX, invaders.powerups[i].y + shakeY, SSD1306_WHITE);
-          break;
-        case 1: // Shield
-          display.drawCircle(invaders.powerups[i].x + shakeX, invaders.powerups[i].y + shakeY, 3, SSD1306_WHITE);
-          break;
-        case 2: // Life
-          display.fillRect(invaders.powerups[i].x - 2 + shakeX, invaders.powerups[i].y - 2 + shakeY, 4, 4, SSD1306_WHITE);
-          break;
-      }
-    }
-  }
-
-  drawParticles();
-  
-  // Game Over
-  if (invaders.gameOver) {
-    display.fillRect(10, 20, 108, 30, SSD1306_BLACK);
-    display.drawRect(10, 20, 108, 30, SSD1306_WHITE);
-    display.setTextSize(1);
-    display.setCursor(30, 25);
-    display.print("GAME OVER");
-    display.setCursor(25, 38);
-    display.print("Score: ");
-    display.print(invaders.score);
-  }
-  
-  display.display();
-}
-
-void handleSpaceInvadersInput() {
-  if (invaders.gameOver) return;
-  float speed = 120.0f; // pixels per second
-
-  if (digitalRead(BTN_LEFT) == LOW) {
-    invaders.playerX -= speed * deltaTime;
-  }
-  if (digitalRead(BTN_RIGHT) == LOW) {
-    invaders.playerX += speed * deltaTime;
-  }
-
-  // Clamp
-  if (invaders.playerX < 0) invaders.playerX = 0;
-  if (invaders.playerX > SCREEN_WIDTH - invaders.playerWidth) invaders.playerX = SCREEN_WIDTH - invaders.playerWidth;
-
-  // Auto-fire if holding touch button
-  if (digitalRead(TOUCH_LEFT) == HIGH) {
-     handleSelect(); // Re-use select logic for shooting
-  }
-}
-
-// ========== SIDE SCROLLER SHOOTER GAME ==========
-
-void initSideScroller() {
-  scroller.playerX = 20;
-  scroller.playerY = SCREEN_HEIGHT / 2;
-  scroller.playerWidth = 8;
-  scroller.playerHeight = 6;
-  scroller.lives = 3;
-  scroller.score = 0;
-  scroller.level = 1;
-  scroller.gameOver = false;
-  scroller.weaponLevel = 1;
-  scroller.specialCharge = 0;
-  scroller.shieldActive = false;
-  scroller.lastMove = 0;
-  scroller.lastShoot = 0;
-  scroller.lastEnemySpawn = 0;
-  scroller.lastObstacleSpawn = 0;
-  scroller.scrollOffset = 0;
-  
-  // Clear everything
-  for (int i = 0; i < MAX_OBSTACLES; i++) {
-    scroller.obstacles[i].active = false;
-    scroller.enemyBullets[i].active = false;
-  }
-  for (int i = 0; i < MAX_SCROLLER_BULLETS; i++) {
-    scroller.bullets[i].active = false;
-  }
-  for (int i = 0; i < MAX_SCROLLER_ENEMIES; i++) {
-    scroller.enemies[i].active = false;
-  }
-}
-
-void updateSideScroller() {
-  if (scroller.gameOver) return;
-  
-  unsigned long now = millis();
-  
-  updateParticles();
-  if (screenShake > 0) screenShake--;
-
-  scroller.scrollOffset += 60.0f * deltaTime;
-  if (scroller.scrollOffset > SCREEN_WIDTH) scroller.scrollOffset = 0;
-  
-  // Spawn obstacles (More varied speed)
-  if (now - scroller.lastObstacleSpawn > 2000) {
-    for (int i = 0; i < MAX_OBSTACLES; i++) {
-      if (!scroller.obstacles[i].active) {
-        scroller.obstacles[i].x = SCREEN_WIDTH;
-        scroller.obstacles[i].y = random(15, SCREEN_HEIGHT - 20);
-        scroller.obstacles[i].width = 8;
-        scroller.obstacles[i].height = 12;
-        scroller.obstacles[i].scrollSpeed = 1.0 + (random(0, 10) / 5.0); // 1.0 to 3.0
-        scroller.obstacles[i].active = true;
-        break;
-      }
-    }
-    scroller.lastObstacleSpawn = now;
-  }
-  
-  // Spawn enemies
-  if (now - scroller.lastEnemySpawn > 1500) {
-    for (int i = 0; i < MAX_SCROLLER_ENEMIES; i++) {
-      if (!scroller.enemies[i].active) {
-        scroller.enemies[i].x = SCREEN_WIDTH;
-        scroller.enemies[i].y = random(15, SCREEN_HEIGHT - 15);
-        scroller.enemies[i].width = 8;
-        scroller.enemies[i].height = 8;
-        scroller.enemies[i].type = random(0, 3);
-        scroller.enemies[i].health = scroller.enemies[i].type + 2;
-        scroller.enemies[i].dirY = random(-1, 2);
-        scroller.enemies[i].active = true;
-        break;
-      }
-    }
-    scroller.lastEnemySpawn = now;
-  }
-  
-  // Move obstacles
-  for (int i = 0; i < MAX_OBSTACLES; i++) {
-    if (scroller.obstacles[i].active) {
-      scroller.obstacles[i].x -= scroller.obstacles[i].scrollSpeed * 60.0f * deltaTime;
-      if (scroller.obstacles[i].x < -scroller.obstacles[i].width) {
-        scroller.obstacles[i].active = false;
-      }
-    }
-  }
-  
-  // Move and update enemies
-  float enemyBaseSpeed = 50.0f;
-  for (int i = 0; i < MAX_SCROLLER_ENEMIES; i++) {
-    if (scroller.enemies[i].active) {
-      scroller.enemies[i].x -= enemyBaseSpeed * deltaTime;
-      scroller.enemies[i].y += scroller.enemies[i].dirY * (enemyBaseSpeed / 2.0f) * deltaTime;
-      
-      // Bounce off edges
-      if (scroller.enemies[i].y < 12) {
-        scroller.enemies[i].y = 12;
-        scroller.enemies[i].dirY = 1;
-      }
-      if (scroller.enemies[i].y > SCREEN_HEIGHT - 8) {
-        scroller.enemies[i].y = SCREEN_HEIGHT - 8;
-        scroller.enemies[i].dirY = -1;
-      }
-      
-      // Enemy shooting
-      if (scroller.enemies[i].type == 1 && random(0, 50) == 0) {
-        for (int j = 0; j < MAX_OBSTACLES; j++) {
-          if (!scroller.enemyBullets[j].active) {
-            scroller.enemyBullets[j].x = scroller.enemies[i].x;
-            scroller.enemyBullets[j].y = scroller.enemies[i].y + 4;
-            scroller.enemyBullets[j].active = true;
-            break;
-          }
-        }
-      }
-      
-      if (scroller.enemies[i].x < -8) {
-        scroller.enemies[i].active = false;
-      }
-    }
-  }
-  
-  // Move bullets
-  float playerBulletSpeed = 200.0f;
-  for (int i = 0; i < MAX_SCROLLER_BULLETS; i++) {
-    if (scroller.bullets[i].active) {
-      scroller.bullets[i].x += scroller.bullets[i].dirX * playerBulletSpeed * deltaTime;
-      scroller.bullets[i].y += scroller.bullets[i].dirY * playerBulletSpeed * deltaTime;
-      
-      if (scroller.bullets[i].x < 0 || scroller.bullets[i].x > SCREEN_WIDTH ||
-          scroller.bullets[i].y < 12 || scroller.bullets[i].y > SCREEN_HEIGHT) {
-        scroller.bullets[i].active = false;
-      }
-    }
-  }
-  
-  float enemyBulletSpeed = 120.0f;
-  for (int i = 0; i < MAX_OBSTACLES; i++) {
-    if (scroller.enemyBullets[i].active) {
-      scroller.enemyBullets[i].x -= enemyBulletSpeed * deltaTime;
-      if (scroller.enemyBullets[i].x < 0) {
-        scroller.enemyBullets[i].active = false;
-      }
-    }
-  }
-  
-  // Collision - player bullets vs enemies
-  for (int i = 0; i < MAX_SCROLLER_BULLETS; i++) {
-    if (scroller.bullets[i].active) {
-      for (int j = 0; j < MAX_SCROLLER_ENEMIES; j++) {
-        if (scroller.enemies[j].active) {
-          if (abs(scroller.bullets[i].x - scroller.enemies[j].x) < 8 &&
-              abs(scroller.bullets[i].y - scroller.enemies[j].y) < 8) {
-            
-            scroller.bullets[i].active = false;
-            scroller.enemies[j].health -= scroller.bullets[i].damage;
-            
-            if (scroller.enemies[j].health <= 0) {
-              scroller.enemies[j].active = false;
-              spawnExplosion(scroller.enemies[j].x + 4, scroller.enemies[j].y + 4, 6);
-              screenShake = 2;
-              scroller.score += (scroller.enemies[j].type + 1) * 15;
-              scroller.specialCharge = min(scroller.specialCharge + 10, 100);
-            }
-            break;
-          }
-        }
-      }
-      
-      // Bullets vs obstacles
-      for (int j = 0; j < MAX_OBSTACLES; j++) {
-        if (scroller.obstacles[j].active) {
-          if (abs(scroller.bullets[i].x - scroller.obstacles[j].x) < 8 &&
-              abs(scroller.bullets[i].y - scroller.obstacles[j].y) < 8) {
-            scroller.bullets[i].active = false;
-            break;
-          }
-        }
-      }
-    }
-  }
-  
-  // Collision - player vs obstacles
-  for (int i = 0; i < MAX_OBSTACLES; i++) {
-    if (scroller.obstacles[i].active) {
-      if (abs(scroller.playerX - scroller.obstacles[i].x) < 8 &&
-          abs(scroller.playerY - scroller.obstacles[i].y) < 8) {
-        if (!scroller.shieldActive) {
-          scroller.lives--;
-          screenShake = 6;
-          if (scroller.lives <= 0) {
-            scroller.gameOver = true;
-          }
-        }
-        scroller.obstacles[i].active = false;
-      }
-    }
-  }
-  
-  // Collision - player vs enemies
-  for (int i = 0; i < MAX_SCROLLER_ENEMIES; i++) {
-    if (scroller.enemies[i].active) {
-      if (abs(scroller.playerX - scroller.enemies[i].x) < 8 &&
-          abs(scroller.playerY - scroller.enemies[i].y) < 8) {
-        if (!scroller.shieldActive) {
-          scroller.lives--;
-          screenShake = 6;
-          if (scroller.lives <= 0) {
-            scroller.gameOver = true;
-          }
-        }
-        scroller.enemies[i].active = false;
-      }
-    }
-  }
-  
-  // Collision - enemy bullets vs player
-  for (int i = 0; i < MAX_OBSTACLES; i++) {
-    if (scroller.enemyBullets[i].active) {
-      if (abs(scroller.enemyBullets[i].x - scroller.playerX) < 6 &&
-          abs(scroller.enemyBullets[i].y - scroller.playerY) < 6) {
-        if (!scroller.shieldActive) {
-          scroller.lives--;
-          screenShake = 6;
-          if (scroller.lives <= 0) {
-            scroller.gameOver = true;
-          }
-        }
-        scroller.enemyBullets[i].active = false;
+      if (WiFi.status() == WL_CONNECTED) {
+        lastWiFiActivity = currentMillis;
       }
     }
   }
 }
 
-void drawSideScroller() {
-  display.clearDisplay();
+// ========== ESP-NOW FUNCTIONS ==========
 
-  int shakeX = 0;
-  int shakeY = 0;
-  if (screenShake > 0) {
-    shakeX = random(-screenShake, screenShake + 1);
-    shakeY = random(-screenShake, screenShake + 1);
-  }
-
-  drawBatteryIndicator();
+void initESPNow() {
+  WiFi.mode(WIFI_AP_STA);
   
-  // Draw HUD
-  display.setTextSize(1);
-  display.setCursor(2, 2);
-  display.print("L:");
-  display.print(scroller.lives);
-  display.setCursor(30, 2);
-  display.print("S:");
-  display.print(scroller.score);
-  display.setCursor(75, 2);
-  display.print("W:");
-  display.print(scroller.weaponLevel);
-  display.setCursor(100, 2);
-  display.print("SP:");
-  display.print(scroller.specialCharge);
-  
-  display.drawLine(0, 10, SCREEN_WIDTH, 10, SSD1306_WHITE);
-  
-  // Draw scrolling background (Parallax)
-  for (int i = 0; i < SCREEN_WIDTH; i += 16) {
-    int x = (i + scroller.scrollOffset) % SCREEN_WIDTH;
-    display.drawPixel(x, 12 + random(0, 3), SSD1306_WHITE);
-    display.drawPixel(x, SCREEN_HEIGHT - 2 - random(0, 3), SSD1306_WHITE);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW init failed");
+    return;
   }
   
-  // Draw player (Neon Style)
-  if (scroller.shieldActive && (millis() / 100) % 2 == 0) {
-    display.drawCircle(scroller.playerX + shakeX, scroller.playerY + shakeY, 7, SSD1306_WHITE);
-  }
+  esp_now_register_recv_cb(onESPNowDataReceived);
+  esp_now_register_send_cb(onESPNowDataSent);
   
-  // Player ship design
-  display.drawTriangle(
-    scroller.playerX + 4 + shakeX, scroller.playerY + shakeY,
-    scroller.playerX - 4 + shakeX, scroller.playerY - 3 + shakeY,
-    scroller.playerX - 4 + shakeX, scroller.playerY + 3 + shakeY,
-    SSD1306_WHITE
-  );
+  Serial.println("ESP-NOW initialized");
   
-  // Draw obstacles (as asteroids)
-  for (int i = 0; i < MAX_OBSTACLES; i++) {
-    if (scroller.obstacles[i].active) {
-      display.drawCircle(scroller.obstacles[i].x + shakeX, scroller.obstacles[i].y + shakeY, 5, SSD1306_WHITE);
-      display.drawPixel(scroller.obstacles[i].x + shakeX + 2, scroller.obstacles[i].y + shakeY - 2, SSD1306_WHITE);
-    }
-  }
-  
-  // Draw enemies (Neon Style)
-  for (int i = 0; i < MAX_SCROLLER_ENEMIES; i++) {
-    if (scroller.enemies[i].active) {
-      switch(scroller.enemies[i].type) {
-        case 0: // Basic
-          display.drawCircle(scroller.enemies[i].x + shakeX, scroller.enemies[i].y + shakeY, 4, SSD1306_WHITE);
-          break;
-        case 1: // Shooter
-          display.drawRect(scroller.enemies[i].x - 4 + shakeX, scroller.enemies[i].y - 4 + shakeY, 8, 8, SSD1306_WHITE);
-          break;
-        case 2: // Kamikaze
-          display.drawTriangle(
-            scroller.enemies[i].x - 6 + shakeX, scroller.enemies[i].y + shakeY,
-            scroller.enemies[i].x + 2 + shakeX, scroller.enemies[i].y - 4 + shakeY,
-            scroller.enemies[i].x + 2 + shakeX, scroller.enemies[i].y + 4 + shakeY,
-            SSD1306_WHITE
-          );
-          break;
-      }
-    }
-  }
-  
-  // Draw bullets (Neon Style)
-  for (int i = 0; i < MAX_SCROLLER_BULLETS; i++) {
-    if (scroller.bullets[i].active) {
-      display.drawLine(scroller.bullets[i].x + shakeX, scroller.bullets[i].y + shakeY,
-                       scroller.bullets[i].x + shakeX - 3, scroller.bullets[i].y + shakeY,
-                       SSD1306_WHITE);
-    }
-  }
-  
-  for (int i = 0; i < MAX_OBSTACLES; i++) {
-    if (scroller.enemyBullets[i].active) {
-      display.drawLine(scroller.enemyBullets[i].x + shakeX, scroller.enemyBullets[i].y + shakeY,
-                       scroller.enemyBullets[i].x + shakeX + 2, scroller.enemyBullets[i].y + shakeY,
-                       SSD1306_WHITE);
-    }
-  }
-
-  drawParticles();
-  
-  // Game Over
-  if (scroller.gameOver) {
-    display.fillRect(10, 20, 108, 30, SSD1306_BLACK);
-    display.drawRect(10, 20, 108, 30, SSD1306_WHITE);
-    display.setTextSize(1);
-    display.setCursor(30, 25);
-    display.print("GAME OVER");
-    display.setCursor(25, 38);
-    display.print("Score: ");
-    display.print(scroller.score);
-  }
-  
-  display.display();
+  // Print MAC address
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  Serial.printf("MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", 
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
-void handleSideScrollerInput() {
-  if (scroller.gameOver) return;
-  float speed = 110.0f; // pixels per second
-
-  if (digitalRead(BTN_LEFT) == LOW) scroller.playerX -= speed * deltaTime;
-  if (digitalRead(BTN_RIGHT) == LOW) scroller.playerX += speed * deltaTime;
-  if (digitalRead(BTN_UP) == LOW) scroller.playerY -= speed * deltaTime;
-  if (digitalRead(BTN_DOWN) == LOW) scroller.playerY += speed * deltaTime;
-
-  // Clamp
-  if (scroller.playerX < 0) scroller.playerX = 0;
-  if (scroller.playerX > SCREEN_WIDTH - scroller.playerWidth) scroller.playerX = SCREEN_WIDTH - scroller.playerWidth;
-  if (scroller.playerY < 12) scroller.playerY = 12;
-  if (scroller.playerY > SCREEN_HEIGHT - scroller.playerHeight) scroller.playerY = SCREEN_HEIGHT - scroller.playerHeight;
-
-  // Auto-fire
-  if (digitalRead(TOUCH_LEFT) == HIGH) {
-     handleSelect();
+// ESP-NOW callback untuk versi Arduino Core terbaru
+void onESPNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  if (inboxCount >= MAX_MESSAGES) {
+    // Shift messages
+    for (int i = 0; i < MAX_MESSAGES - 1; i++) {
+      inbox[i] = inbox[i + 1];
+    }
+    inboxCount = MAX_MESSAGES - 1;
   }
+  
+  Message newMsg;
+  strncpy(newMsg.text, (char*)data, min(len, 199));
+  newMsg.text[min(len, 199)] = '\0';
+  memcpy(newMsg.sender, info->src_addr, 6);
+  newMsg.timestamp = millis();
+  newMsg.read = false;
+  
+  inbox[inboxCount++] = newMsg;
+  
+  ledQuickFlash();
+  Serial.println("Message received!");
 }
 
-// ========== PONG GAME ==========
-
-void initPong() {
-  pong.ballX = SCREEN_WIDTH / 2;
-  pong.ballY = SCREEN_HEIGHT / 2;
-  pong.ballDirX = random(0, 2) == 0 ? -1 : 1;
-  pong.ballDirY = random(0, 2) == 0 ? -1 : 1;
-  pong.ballSpeed = 2;
-  pong.paddle1Y = SCREEN_HEIGHT / 2 - 10;
-  pong.paddle2Y = SCREEN_HEIGHT / 2 - 10;
-  pong.paddleWidth = 4;
-  pong.paddleHeight = 20;
-  pong.score1 = 0;
-  pong.score2 = 0;
-  pong.gameOver = false;
-  pong.aiMode = true;
-  pong.difficulty = 2;
-}
-
-void updatePong() {
-  if (pong.gameOver) return;
-
-  updateParticles();
-  if (screenShake > 0) screenShake--;
-  
-  // Move ball
-  if (!pongResetting) {
-    float effectiveSpeed = pong.ballSpeed * 60.0f; // Base speed at 60fps
-    pong.ballX += pong.ballDirX * effectiveSpeed * deltaTime;
-    pong.ballY += pong.ballDirY * effectiveSpeed * deltaTime;
-  }
-  
-  // Ball collision with top/bottom
-  if (pong.ballY <= 12) {
-    pong.ballY = 12;
-    pong.ballDirY *= -1;
-  }
-  if (pong.ballY >= SCREEN_HEIGHT - 2) {
-    pong.ballY = SCREEN_HEIGHT - 2;
-    pong.ballDirY *= -1;
-  }
-  
-  // Ball collision with paddles
-  // Left paddle
-  if (pong.ballX <= 6 && pong.ballX >= 2) {
-    if (pong.ballY >= pong.paddle1Y - 2 && pong.ballY <= pong.paddle1Y + pong.paddleHeight + 2) {
-      pong.ballDirX = 1;
-      pong.ballSpeed = min(pong.ballSpeed + 0.2f, 5.0f); // Accelerate
-      spawnExplosion(pong.ballX, pong.ballY, 3);
-
-      // Add spin based on where it hit the paddle
-      float hitPos = pong.ballY - (pong.paddle1Y + pong.paddleHeight / 2.0);
-      pong.ballDirY = hitPos / (pong.paddleHeight / 2.0); // -1.0 to 1.0
-
-      ledQuickFlash();
-    }
-  }
-  
-  // Right paddle
-  if (pong.ballX >= SCREEN_WIDTH - 6 && pong.ballX <= SCREEN_WIDTH - 2) {
-    if (pong.ballY >= pong.paddle2Y - 2 && pong.ballY <= pong.paddle2Y + pong.paddleHeight + 2) {
-      pong.ballDirX = -1;
-      pong.ballSpeed = min(pong.ballSpeed + 0.2f, 5.0f); // Accelerate
-      spawnExplosion(pong.ballX, pong.ballY, 3);
-
-      float hitPos = pong.ballY - (pong.paddle2Y + pong.paddleHeight / 2.0);
-      pong.ballDirY = hitPos / (pong.paddleHeight / 2.0);
-
-      ledQuickFlash();
-    }
-  }
-  
-  // Scoring
-  if (!pongResetting) {
-    if (pong.ballX < 0) {
-      pong.score2++;
-      pongResetting = true;
-      pongResetTimer = millis();
-      if (pong.score2 >= 10) pong.gameOver = true;
-    }
-    
-    if (pong.ballX > SCREEN_WIDTH) {
-      pong.score1++;
-      pongResetting = true;
-      pongResetTimer = millis();
-      if (pong.score1 >= 10) pong.gameOver = true;
-    }
+void onESPNowDataSent(const uint8_t *mac, esp_now_send_status_t status) {
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    ledSuccess();
+    showStatus("Message sent!", 1500);
   } else {
-    if (millis() - pongResetTimer > 500) {
-      pongResetting = false;
-      pong.ballX = SCREEN_WIDTH / 2;
-      pong.ballY = SCREEN_HEIGHT / 2;
-      pong.ballDirX = (pong.score1 > pong.score2) ? -1 : 1;
-      pong.ballSpeed = 2.0f;
-    }
+    ledError();
+    showStatus("Send failed!", 1500);
   }
   
-  // AI for right paddle
-  if (pong.aiMode) {
-    float targetY = pong.ballY - pong.paddleHeight / 2.0;
-    float diff = targetY - pong.paddle2Y;
-    
-    // AI difficulty (float speed)
-    float aiSpeed = pong.difficulty * 45.0f; // pixels per second
-    if (abs(diff) > 1.0) { // Add a small deadzone
-      if (diff > 0) pong.paddle2Y += min(aiSpeed * deltaTime, diff);
-      else pong.paddle2Y += max(-aiSpeed * deltaTime, diff);
-    }
+  if (currentState == STATE_ESP_NOW_SEND) {
+    showESPNowSend();
   }
-  
-  // Clamp paddles
-  pong.paddle1Y = constrain(pong.paddle1Y, 12, SCREEN_HEIGHT - pong.paddleHeight);
-  pong.paddle2Y = constrain(pong.paddle2Y, 12, SCREEN_HEIGHT - pong.paddleHeight);
 }
 
-void drawPong() {
+void addPeer(uint8_t* macAddr) {
+  if (peerCount >= MAX_ESP_PEERS) return;
+  
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, macAddr, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  
+  if (esp_now_add_peer(&peerInfo) == ESP_OK) {
+    memcpy(peerAddresses[peerCount], macAddr, 6);
+    peerCount++;
+    ledSuccess();
+  } else {
+    ledError();
+  }
+}
+
+void sendESPNowMessage(String message, uint8_t* targetMac) {
+  esp_now_send(targetMac, (uint8_t*)message.c_str(), message.length());
+}
+
+void showESPNowMenu() {
   display.clearDisplay();
   drawBatteryIndicator();
-  
-  int shakeX = 0;
-  int shakeY = 0;
-  if (screenShake > 0) {
-    shakeX = random(-screenShake, screenShake + 1);
-    shakeY = random(-screenShake, screenShake + 1);
-  }
-
-  // Draw score
-  display.setTextSize(1);
-  display.setCursor(30, 2);
-  display.print(pong.score1);
-  display.setCursor(SCREEN_WIDTH - 40, 2);
-  display.print(pong.score2);
-  
-  display.drawLine(0, 10, SCREEN_WIDTH, 10, SSD1306_WHITE);
-  
-  // Draw center line
-  for (int y = 12; y < SCREEN_HEIGHT; y += 4) {
-    display.drawPixel(SCREEN_WIDTH / 2, y, SSD1306_WHITE);
-  }
-  
-  // Draw paddles (Neon Style)
-  display.drawRect(2, pong.paddle1Y + shakeY, pong.paddleWidth, pong.paddleHeight, SSD1306_WHITE);
-  display.drawRect(SCREEN_WIDTH - 6, pong.paddle2Y + shakeY, pong.paddleWidth, pong.paddleHeight, SSD1306_WHITE);
-  
-  // Draw ball (Neon Style with pulse)
-  float ballPulse = abs(sin(millis() / 150.0f)); // 0.0 to 1.0
-  display.drawCircle(pong.ballX + shakeX, pong.ballY + shakeY, 2 + ballPulse, SSD1306_WHITE);
-
-  drawParticles();
-  
-  // Game Over
-  if (pong.gameOver) {
-    display.fillRect(20, 25, 88, 20, SSD1306_BLACK);
-    display.drawRect(20, 25, 88, 20, SSD1306_WHITE);
-    display.setTextSize(1);
-    display.setCursor(30, 30);
-    if (pong.score1 >= 10) {
-      display.print("PLAYER 1 WINS!");
-    } else {
-      display.print("PLAYER 2 WINS!");
-    }
-  }
-  
-  display.display();
-}
-
-void handlePongInput() {
-  if (pong.gameOver) return;
-  float speed = 130.0f; // pixels per second
-
-  if (digitalRead(BTN_UP) == LOW) pong.paddle1Y -= speed * deltaTime;
-  if (digitalRead(BTN_DOWN) == LOW) pong.paddle1Y += speed * deltaTime;
-
-  // Clamp
-  if (pong.paddle1Y < 12) pong.paddle1Y = 12;
-  if (pong.paddle1Y > SCREEN_HEIGHT - pong.paddleHeight) pong.paddle1Y = SCREEN_HEIGHT - pong.paddleHeight;
-}
-
-// ========== GAME SELECT ==========
-
-void showGameSelect(int x_offset) {
-  display.clearDisplay();
-  drawBatteryIndicator();
+  drawBreadcrumb();
   
   display.setTextSize(1);
-  display.setCursor(x_offset + 25, 2);
-  display.print("SELECT GAME");
+  display.setCursor(20, 12);
+  display.print("ESP-NOW MESH");
   
-  drawIcon(x_offset + 10, 2, ICON_GAME);
+  drawIcon(5, 12, ICON_MESSAGE);
   
-  display.drawLine(x_offset + 0, 12, x_offset + SCREEN_WIDTH, 12, SSD1306_WHITE);
-  
-  const char* games[] = {
-    "Neon Invaders",
-    "Astro Rush",
-    "Vector Pong",
+  const char* menuItems[] = {
+    "Send Message",
+    "Inbox (",
+    "Manage Peers",
     "Back"
   };
   
   for (int i = 0; i < 4; i++) {
-    display.setCursor(x_offset + 10, 18 + i * 11);
+    display.setCursor(10, 26 + i * 10);
     if (i == menuSelection) {
       display.print("> ");
     } else {
       display.print("  ");
     }
-    display.print(games[i]);
+    
+    if (i == 1) {
+      display.print(menuItems[i]);
+      display.print(inboxCount);
+      display.print(")");
+    } else {
+      display.print(menuItems[i]);
+    }
+  }
+  
+  // Show peer count
+  display.setCursor(85, 56);
+  display.print("Peers:");
+  display.print(peerCount);
+  
+  display.display();
+}
+
+void showESPNowSend() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(15, 2);
+  display.print("SEND MESSAGE");
+  
+  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
+  
+  if (peerCount == 0) {
+    display.setCursor(10, 25);
+    display.print("No peers added!");
+    display.setCursor(5, 40);
+    display.print("Add in Manage Peers");
+  } else {
+    display.setCursor(5, 15);
+    display.print("Select peer:");
+    
+    for (int i = 0; i < min(peerCount, 3); i++) {
+      display.setCursor(10, 28 + i * 10);
+      if (i == selectedPeer) {
+        display.print("> ");
+      } else {
+        display.print("  ");
+      }
+      
+      display.printf("%02X:%02X:%02X:%02X:%02X:%02X",
+                    peerAddresses[i][0], peerAddresses[i][1], 
+                    peerAddresses[i][2], peerAddresses[i][3],
+                    peerAddresses[i][4], peerAddresses[i][5]);
+    }
   }
   
   display.display();
 }
 
-void handleGameSelectSelect() {
-  switch(menuSelection) {
-    case 0:
-      initSpaceInvaders();
-      changeState(STATE_GAME_SPACE_INVADERS);
+void showESPNowInbox() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(35, 2);
+  display.print("INBOX (");
+  display.print(inboxCount);
+  display.print(")");
+  
+  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
+  
+  if (inboxCount == 0) {
+    display.setCursor(25, 30);
+    display.print("No messages");
+  } else {
+    int startIdx = max(0, menuSelection);
+    int endIdx = min(inboxCount, startIdx + 4);
+    
+    for (int i = startIdx; i < endIdx; i++) {
+      int y = 15 + (i - startIdx) * 12;
+      
+      if (i == menuSelection) {
+        display.fillRect(0, y, SCREEN_WIDTH, 11, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.setTextColor(SSD1306_WHITE);
+      }
+      
+      display.setCursor(2, y + 2);
+      if (!inbox[i].read) {
+        display.print("* ");
+      } else {
+        display.print("  ");
+      }
+      
+      String msgPreview = String(inbox[i].text);
+      if (msgPreview.length() > 16) {
+        msgPreview = msgPreview.substring(0, 16) + "..";
+      }
+      display.print(msgPreview);
+      
+      display.setTextColor(SSD1306_WHITE);
+    }
+  }
+  
+  display.display();
+}
+
+void showESPNowPeers() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(20, 2);
+  display.print("MANAGE PEERS");
+  
+  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
+  
+  display.setCursor(5, 15);
+  display.print("Peers: ");
+  display.print(peerCount);
+  display.print("/");
+  display.print(MAX_ESP_PEERS);
+  
+  if (peerCount == 0) {
+    display.setCursor(5, 30);
+    display.print("Add peer MAC addr");
+    display.setCursor(5, 40);
+    display.print("via Serial console");
+  } else {
+    for (int i = 0; i < min(peerCount, 3); i++) {
+      display.setCursor(5, 28 + i * 10);
+      display.printf("%d. %02X:%02X:%02X:%02X:%02X:%02X",
+                    i + 1,
+                    peerAddresses[i][0], peerAddresses[i][1],
+                    peerAddresses[i][2], peerAddresses[i][3],
+                    peerAddresses[i][4], peerAddresses[i][5]);
+    }
+  }
+  
+  display.display();
+}
+
+// ========== BATTERY GUARDIAN ==========
+
+void updateBatteryHistory() {
+  batteryHistory[batteryHistoryIndex] = batteryPercent;
+  batteryTimestamps[batteryHistoryIndex] = millis();
+  
+  batteryHistoryIndex = (batteryHistoryIndex + 1) % BATTERY_HISTORY_SIZE;
+  if (batteryHistoryIndex == 0) batteryHistoryFilled = true;
+}
+
+void checkBatteryHealth() {
+  if (!batteryHistoryFilled && batteryHistoryIndex < 5) return;
+  
+  int dataPoints = batteryHistoryFilled ? BATTERY_HISTORY_SIZE : batteryHistoryIndex;
+  if (dataPoints < 5) return;
+  
+  // Calculate drain rate (% per minute)
+  int oldIdx = batteryHistoryFilled ? batteryHistoryIndex : 0;
+  int recentIdx = batteryHistoryFilled ? 
+                  (batteryHistoryIndex - 1 + BATTERY_HISTORY_SIZE) % BATTERY_HISTORY_SIZE :
+                  batteryHistoryIndex - 1;
+  
+  int batteryDiff = batteryHistory[oldIdx] - batteryHistory[recentIdx];
+  unsigned long timeDiff = (batteryTimestamps[recentIdx] - batteryTimestamps[oldIdx]) / 60000; // minutes
+  
+  if (timeDiff > 0) {
+    batteryDrainRate = (float)batteryDiff / timeDiff;
+    
+    // Check for battery leak (>2% per minute)
+    if (batteryDrainRate > 2.0 && !isCharging) {
+      batteryLeakWarning = true;
+    } else {
+      batteryLeakWarning = false;
+    }
+    
+    // Estimate time left
+    if (batteryDrainRate > 0 && !isCharging) {
+      estimatedMinutesLeft = (int)(batteryPercent / batteryDrainRate);
+    } else if (isCharging && batteryDrainRate < 0) {
+      estimatedMinutesLeft = (int)((100 - batteryPercent) / abs(batteryDrainRate));
+    } else {
+      estimatedMinutesLeft = -1;
+    }
+  }
+}
+
+void showBatteryGuardian() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(5, 12);
+  display.print("BATTERY GUARDIAN");
+  
+  drawIcon(108, 12, ICON_POWER);
+  
+  display.drawLine(0, 22, SCREEN_WIDTH, 22, SSD1306_WHITE);
+  
+  // Battery status
+  display.setCursor(2, 26);
+  display.print("Level: ");
+  display.print(batteryPercent);
+  display.print("% (");
+  display.print(batteryVoltage, 2);
+  display.print("V)");
+  
+  // Drain rate
+  display.setCursor(2, 36);
+  display.print("Drain: ");
+  if (isCharging) {
+    display.print("+");
+    display.print(abs(batteryDrainRate), 2);
+    display.print("%/min");
+  } else {
+    display.print(batteryDrainRate, 2);
+    display.print("%/min");
+  }
+  
+  // Time estimate
+  display.setCursor(2, 46);
+  if (estimatedMinutesLeft > 0) {
+    if (isCharging) {
+      display.print("Full in: ");
+    } else {
+      display.print("Empty in: ");
+    }
+    
+    int hours = estimatedMinutesLeft / 60;
+    int mins = estimatedMinutesLeft % 60;
+    
+    if (hours > 0) {
+      display.print(hours);
+      display.print("h ");
+    }
+    display.print(mins);
+    display.print("m");
+  } else {
+    display.print("Time: Calculating...");
+  }
+  
+  // Warning
+  if (batteryLeakWarning) {
+    if ((millis() / 500) % 2 == 0) {
+      display.fillRect(0, 56, SCREEN_WIDTH, 8, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+      display.setCursor(15, 57);
+      display.print("BATTERY LEAK!");
+      display.setTextColor(SSD1306_WHITE);
+    }
+  }
+  
+  display.display();
+}
+
+// ========== POWER CONSUMPTION MONITOR ==========
+
+void updatePowerConsumption() {
+  // WiFi power estimation
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiPowerDraw = 80; // ~80mA when connected
+  } else if (WiFi.getMode() != WIFI_OFF) {
+    wifiPowerDraw = 120; // ~120mA when scanning
+  } else {
+    wifiPowerDraw = 0;
+  }
+  
+  // Display power (always on in this code)
+  displayPowerDraw = 20; // ~20mA for OLED
+  
+  // CPU power based on frequency
+  cpuPowerDraw = map(cpuFreq, 80, 160, 30, 60); // 30-60mA
+  
+  // Total power draw in mA
+  totalPowerDraw = wifiPowerDraw + displayPowerDraw + cpuPowerDraw;
+}
+
+void showPowerConsumption() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(10, 2);
+  display.print("POWER MONITOR");
+  
+  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
+  
+  // Component breakdown
+  display.setCursor(2, 15);
+  display.print("WiFi:");
+  display.setCursor(70, 15);
+  display.print(wifiPowerDraw, 0);
+  display.print(" mA");
+  
+  display.setCursor(2, 25);
+  display.print("Display:");
+  display.setCursor(70, 25);
+  display.print(displayPowerDraw, 0);
+  display.print(" mA");
+  
+  display.setCursor(2, 35);
+  display.print("CPU:");
+  display.setCursor(70, 35);
+  display.print(cpuPowerDraw, 0);
+  display.print(" mA");
+  
+  display.drawLine(2, 43, SCREEN_WIDTH - 2, 43, SSD1306_WHITE);
+  
+  display.setCursor(2, 46);
+  display.print("TOTAL:");
+  display.setCursor(70, 46);
+  display.print(totalPowerDraw, 0);
+  display.print(" mA");
+  
+  // Power bar graph
+  int graphY = 56;
+  int graphW = 126;
+  
+  int wifiBar = map(wifiPowerDraw, 0, totalPowerDraw, 0, graphW);
+  int displayBar = map(displayPowerDraw, 0, totalPowerDraw, 0, graphW);
+  int cpuBar = map(cpuPowerDraw, 0, totalPowerDraw, 0, graphW);
+  
+  display.fillRect(1, graphY, wifiBar, 3, SSD1306_WHITE);
+  display.fillRect(1, graphY + 3, displayBar, 2, SSD1306_WHITE);
+  display.fillRect(1, graphY + 5, cpuBar, 2, SSD1306_WHITE);
+  
+  display.display();
+}
+
+// ========== ZEN MODE ==========
+
+void enterZenMode() {
+  zenModeActive = true;
+  zenModeStartTime = millis();
+  
+  // Disconnect WiFi
+  WiFi.disconnect();
+  WiFi.mode(WIFI_OFF);
+  
+  showZenMode();
+}
+
+void exitZenMode() {
+  zenModeActive = false;
+  ledSuccess();
+  showStatus("Zen Mode ended\nWelcome back!", 2000);
+  currentState = STATE_SETTINGS_MENU;
+  showSettingsMenu();
+}
+
+void showZenMode() {
+  display.clearDisplay();
+  
+  // Calculate time in zen mode
+  unsigned long zenDuration = (millis() - zenModeStartTime) / 1000; // seconds
+  int zenMinutes = zenDuration / 60;
+  int zenSeconds = zenDuration % 60;
+  
+  // Minimal clock
+  display.setTextSize(2);
+  String timeStr = "";
+  if (zenMinutes < 10) timeStr += "0";
+  timeStr += String(zenMinutes);
+  timeStr += ":";
+  if (zenSeconds < 10) timeStr += "0";
+  timeStr += String(zenSeconds);
+  
+  int textW = timeStr.length() * 12;
+  display.setCursor((SCREEN_WIDTH - textW) / 2, 15);
+  display.print(timeStr);
+  
+  // Breathing circle animation
+  display.setTextSize(1);
+  int centerX = SCREEN_WIDTH / 2;
+  int centerY = 45;
+  int baseRadius = 8;
+  int breathRadius = baseRadius + map(zenBreathPhase, 0, 100, 0, 6);
+  
+  display.drawCircle(centerX, centerY, breathRadius, SSD1306_WHITE);
+  if (zenBreathPhase > 30 && zenBreathPhase < 70) {
+    display.drawCircle(centerX, centerY, breathRadius - 2, SSD1306_WHITE);
+  }
+  
+  // Battery indicator (minimal)
+  display.setCursor(2, 2);
+  display.print(batteryPercent);
+  display.print("%");
+  
+  // Zen message
+  display.setCursor(25, 58);
+  display.print("Breathe...");
+  
+  display.display();
+}
+
+// ========== DEVELOPER MODE ==========
+
+void showDeveloperMode() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(15, 2);
+  display.print("DEVELOPER MODE");
+  
+  drawIcon(2, 2, ICON_DEV);
+  
+  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
+  
+  // Real-time debugging info
+  display.setCursor(2, 14);
+  display.print("Heap: ");
+  display.print(freeHeap / 1024);
+  display.print("/");
+  display.print(totalHeap / 1024);
+  display.print("KB");
+  
+  display.setCursor(2, 23);
+  display.print("Min Heap: ");
+  display.print(minFreeHeap / 1024);
+  display.print("KB");
+  
+  if (lowMemoryWarning) {
+    display.print(" !");
+  }
+  
+  display.setCursor(2, 32);
+  display.print("CPU: ");
+  display.print((int)cpuFreq);
+  display.print("MHz ");
+  display.print(cpuTemp, 1);
+  display.print("C");
+  
+  display.setCursor(2, 41);
+  display.print("Loop: ");
+  display.print(lastLoopCount);
+  display.print("/s");
+  
+  display.setCursor(2, 50);
+  display.print("Battery: ");
+  display.print(batteryDrainRate, 2);
+  display.print("%/m");
+  
+  // Status bar
+  if (lowMemoryWarning && (millis() / 500) % 2 == 0) {
+    display.fillRect(0, 58, SCREEN_WIDTH, 6, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+    display.setCursor(20, 59);
+    display.print("LOW MEMORY!");
+    display.setTextColor(SSD1306_WHITE);
+  }
+  
+  display.display();
+}
+
+// ========== DISPLAY SETTINGS ==========
+
+void showDisplaySettings() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(10, 2);
+  display.print("DISPLAY SETTINGS");
+  
+  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
+  
+  const char* menuItems[] = {
+    "Font Size",
+    "Anim Speed",
+    "Save & Back"
+  };
+  
+  for (int i = 0; i < 3; i++) {
+    display.setCursor(5, 20 + i * 12);
+    if (i == menuSelection) {
+      display.print("> ");
+    } else {
+      display.print("  ");
+    }
+    display.print(menuItems[i]);
+    
+    // Show current values
+    if (i == 0) {
+      display.setCursor(90, 20 + i * 12);
+      display.print("[");
+      display.print(fontSize);
+      display.print("]");
+    } else if (i == 1) {
+      display.setCursor(90, 20 + i * 12);
+      display.print("[");
+      display.print(animSpeed);
+      display.print("]");
+    }
+  }
+  
+  // Preview
+  display.setCursor(5, 50);
+  display.print("Preview:");
+  display.setTextSize(fontSize);
+  display.setCursor(55, 48);
+  display.print("ABC");
+  
+  display.display();
+}
+
+// ========== SYSTEM INFO WITH CPU TEMP ==========
+
+void updateSystemStats() {
+  freeHeap = ESP.getFreeHeap();
+  totalHeap = ESP.getHeapSize();
+  minFreeHeap = ESP.getMinFreeHeap();
+  cpuFreq = ESP.getCpuFreqMHz();
+  
+  // Read CPU temperature
+  cpuTemp = temperatureRead();
+  
+  // Check for low memory
+  if (freeHeap < 20000) { // Less than 20KB
+    lowMemoryWarning = true;
+  } else {
+    lowMemoryWarning = false;
+  }
+}
+
+void showSystemInfo() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(15, 2);
+  display.print("SYSTEM INFO");
+  
+  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
+  
+  // Memory info
+  display.setCursor(2, 15);
+  display.print("Free Heap:");
+  display.setCursor(70, 15);
+  display.print(freeHeap / 1024);
+  display.print(" KB");
+  
+  if (lowMemoryWarning) {
+    display.setCursor(110, 15);
+    display.print("!");
+  }
+  
+  display.setCursor(2, 24);
+  display.print("Total:");
+  display.setCursor(70, 24);
+  display.print(totalHeap / 1024);
+  display.print(" KB");
+  
+  // CPU info
+  display.setCursor(2, 33);
+  display.print("CPU Freq:");
+  display.setCursor(70, 33);
+  display.print((int)cpuFreq);
+  display.print(" MHz");
+  
+  // CPU Temperature
+  display.setCursor(2, 42);
+  display.print("CPU Temp:");
+  display.setCursor(70, 42);
+  display.print(cpuTemp, 1);
+  display.print(" C");
+  
+  // Loop rate
+  display.setCursor(2, 51);
+  display.print("Loop/sec:");
+  display.setCursor(70, 51);
+  display.print(lastLoopCount);
+  
+  // Health warning
+  if (lowMemoryWarning && (millis() / 500) % 2 == 0) {
+    display.fillRect(0, 58, SCREEN_WIDTH, 6, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+    display.setCursor(25, 59);
+    display.print("LOW MEMORY");
+    display.setTextColor(SSD1306_WHITE);
+  }
+  
+  display.display();
+}
+
+// ========== SETTINGS MENU ==========
+
+void showSettingsMenu() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(25, 2);
+  display.print("SETTINGS");
+  
+  drawIcon(10, 2, ICON_SETTINGS);
+  
+  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
+  
+  const char* menuItems[] = {
+    "WiFi Auto-Off",
+    "Display",
+    "System Info",
+    "Developer Mode",
+    "Zen Mode",
+    "Back"
+  };
+  
+  int visibleItems = 5;
+  int startIdx = max(0, settingsMenuSelection - 2);
+  int endIdx = min(6, startIdx + visibleItems);
+  
+  for (int i = startIdx; i < endIdx; i++) {
+    int y = 15 + (i - startIdx) * 10;
+    display.setCursor(5, y);
+    
+    if (i == settingsMenuSelection) {
+      display.print("> ");
+    } else {
+      display.print("  ");
+    }
+    display.print(menuItems[i]);
+    
+    // Show status
+    if (i == 0) {
+      display.setCursor(95, y);
+      display.print(wifiAutoOffEnabled ? "[ON]" : "[OFF]");
+    } else if (i == 3) {
+      display.setCursor(95, y);
+      display.print(devModeEnabled ? "[ON]" : "[OFF]");
+    }
+  }
+  
+  display.display();
+}
+
+void handleSettingsMenuSelect() {
+  switch(settingsMenuSelection) {
+    case 0: // Toggle WiFi Auto-Off
+      wifiAutoOffEnabled = !wifiAutoOffEnabled;
+      preferences.putBool("wifiAutoOff", wifiAutoOffEnabled);
+      ledSuccess();
+      if (wifiAutoOffEnabled) {
+        lastWiFiActivity = millis();
+        showStatus("WiFi Auto-Off\nENABLED", 1500);
+      } else {
+        showStatus("WiFi Auto-Off\nDISABLED", 1500);
+      }
+      showSettingsMenu();
       break;
-    case 1:
-      initSideScroller();
-      changeState(STATE_GAME_SIDE_SCROLLER);
+    case 1: // Display Settings
+      previousState = currentState;
+      currentState = STATE_DISPLAY_SETTINGS;
+      menuSelection = 0;
+      showDisplaySettings();
       break;
-    case 2:
-      initPong();
-      changeState(STATE_GAME_PONG);
+    case 2: // System Info
+      previousState = currentState;
+      currentState = STATE_SYSTEM_INFO;
+      showSystemInfo();
       break;
-    case 3:
-      changeState(STATE_MAIN_MENU);
+    case 3: // Toggle Developer Mode
+      devModeEnabled = !devModeEnabled;
+      preferences.putBool("devMode", devModeEnabled);
+      ledSuccess();
+      if (devModeEnabled) {
+        showStatus("Developer Mode\nENABLED", 1500);
+        currentState = STATE_DEVELOPER_MODE;
+        showDeveloperMode();
+      } else {
+        showStatus("Developer Mode\nDISABLED", 1500);
+        showSettingsMenu();
+      }
+      break;
+    case 4: // Zen Mode
+      enterZenMode();
+      break;
+    case 5: // Back
+      currentState = STATE_MAIN_MENU;
+      menuSelection = 0;
+      showMainMenu();
       break;
   }
 }
 
-// ========== WIFI FUNCTIONS ==========
+// ========== BREADCRUMB NAVIGATION ==========
 
-void showWiFiMenu(int x_offset) {
+void drawBreadcrumb() {
+  String crumb = "";
+  
+  switch(currentState) {
+    case STATE_MAIN_MENU:
+      crumb = "Main";
+      break;
+    case STATE_WIFI_MENU:
+    case STATE_WIFI_SCAN:
+    case STATE_PASSWORD_INPUT:
+      crumb = "Main > WiFi";
+      break;
+    case STATE_CALCULATOR:
+      crumb = "Main > Calc";
+      break;
+    case STATE_POWER_BASE:
+    case STATE_POWER_VISUAL:
+    case STATE_POWER_STATS:
+    case STATE_POWER_GRAPH:
+    case STATE_POWER_CONSUMPTION:
+      crumb = "Main > Power";
+      break;
+    case STATE_SETTINGS_MENU:
+    case STATE_DISPLAY_SETTINGS:
+    case STATE_DEVELOPER_MODE:
+    case STATE_ZEN_MODE:
+    case STATE_SYSTEM_INFO:
+      crumb = "Main > Settings";
+      break;
+    case STATE_BATTERY_GUARDIAN:
+      crumb = "Main > Battery";
+      break;
+    case STATE_ESP_NOW_MENU:
+    case STATE_ESP_NOW_SEND:
+    case STATE_ESP_NOW_INBOX:
+    case STATE_ESP_NOW_PEERS:
+      crumb = "Main > ESP-NOW";
+      break;
+    case STATE_CHAT_RESPONSE:
+    case STATE_KEYBOARD:
+    case STATE_API_SELECT:
+      crumb = "Main > Chat";
+      break;
+    default:
+      crumb = "";
+  }
+  
+  if (crumb.length() > 0 && currentState != STATE_MAIN_MENU) {
+    // Draw breadcrumb at top
+    // (Will be drawn by individual screens)
+  }
+}
+
+// ========== ICON DRAWING ==========
+
+void drawIcon(int x, int y, const unsigned char* icon) {
+  for (int i = 0; i < 8; i++) {
+    byte row = pgm_read_byte(&icon[i]);
+    for (int j = 0; j < 8; j++) {
+      if (row & (1 << (7 - j))) {
+        display.drawPixel(x + j, y + i, SSD1306_WHITE);
+      }
+    }
+  }
+}
+
+// ========== MAIN MENU WITH ICONS ==========
+
+void showMainMenu() {
   display.clearDisplay();
   drawBatteryIndicator();
   
+  if (WiFi.status() == WL_CONNECTED) {
+    drawWiFiSignalBars();
+  }
+  
   display.setTextSize(1);
-  display.setCursor(x_offset + 25, 2);
+  
+  struct MenuItem {
+    const char* text;
+    const unsigned char* icon;
+  };
+  
+  MenuItem menuItems[] = {
+    {"Chat AI", ICON_CHAT},
+    {"WiFi", ICON_WIFI},
+    {"Calculator", ICON_CALC},
+    {"Power", ICON_POWER},
+    {"Battery Guard", ICON_POWER},
+    {"ESP-NOW", ICON_MESSAGE},
+    {"Settings", ICON_SETTINGS}
+  };
+  
+  int startY = 10;
+  int visibleItems = 5;
+  int startIdx = max(0, menuSelection - 2);
+  int endIdx = min(7, startIdx + visibleItems);
+  
+  for (int i = startIdx; i < endIdx; i++) {
+    int y = startY + (i - startIdx) * 10;
+    
+    // Draw icon
+    drawIcon(2, y, menuItems[i].icon);
+    
+    display.setCursor(14, y + 1);
+    if (i == menuSelection) {
+      display.print("> ");
+    } else {
+      display.print("  ");
+    }
+    display.print(menuItems[i].text);
+    
+    // Selection indicator
+    if (i == menuSelection && (millis() / 200) % 2 == 0) {
+      display.fillRect(SCREEN_WIDTH - 6, y, 4, 8, SSD1306_WHITE);
+    }
+  }
+  
+  display.display();
+}
+
+void showMainMenu() {
+  showIconMenu();
+}
+
+void handleMainMenuSelect() {
+  // Mapping berdasarkan selectedIconIndex
+  // ISI SESUAI URUTAN iconMenu[] array
+  switch(selectedIconIndex) {
+    case 0: // Chat AI
+      if (WiFi.status() == WL_CONNECTED) {
+        menuSelection = 0;
+        previousState = currentState;
+        currentState = STATE_API_SELECT;
+        showAPISelect();
+      } else {
+        ledError();
+        showStatus("WiFi not connected!\nGo to WiFi Settings", 2000);
+        showMainMenu();
+      }
+      break;
+    case 1: // WiFi
+      menuSelection = 0;
+      previousState = currentState;
+      currentState = STATE_WIFI_MENU;
+      showWiFiMenu();
+      break;
+    case 2: // Calculator
+      resetCalculator();
+      previousState = currentState;
+      currentState = STATE_CALCULATOR;
+      cursorX = 0;
+      cursorY = 0;
+      showCalculator();
+      break;
+    case 3: // Power
+      powerMenuSelection = 0;
+      previousState = currentState;
+      currentState = STATE_POWER_BASE;
+      showPowerBase();
+      break;
+    case 4: // Battery Guardian
+      previousState = currentState;
+      currentState = STATE_BATTERY_GUARDIAN;
+      showBatteryGuardian();
+      break;
+    case 5: // ESP-NOW
+      menuSelection = 0;
+      previousState = currentState;
+      currentState = STATE_ESP_NOW_MENU;
+      showESPNowMenu();
+      break;
+    case 6: // Settings
+      settingsMenuSelection = 0;
+      previousState = currentState;
+      currentState = STATE_SETTINGS_MENU;
+      showSettingsMenu();
+      break;
+  }
+}
+
+// ========== BACK BUTTON HANDLER ==========
+
+void handleBackButton() {
+  ledQuickFlash();
+  
+  switch(currentState) {
+    case STATE_MAIN_MENU:
+      // Already at main, do nothing
+      break;
+      
+    case STATE_WIFI_MENU:
+    case STATE_CALCULATOR:
+    case STATE_POWER_BASE:
+    case STATE_SETTINGS_MENU:
+    case STATE_BATTERY_GUARDIAN:
+    case STATE_ESP_NOW_MENU:
+      currentState = STATE_MAIN_MENU;
+      menuSelection = 0;
+      showMainMenu();
+      break;
+      
+    case STATE_WIFI_SCAN:
+    case STATE_PASSWORD_INPUT:
+      currentState = STATE_WIFI_MENU;
+      menuSelection = 0;
+      showWiFiMenu();
+      break;
+      
+    case STATE_POWER_VISUAL:
+    case STATE_POWER_STATS:
+    case STATE_POWER_GRAPH:
+    case STATE_POWER_CONSUMPTION:
+      currentState = STATE_POWER_BASE;
+      powerMenuSelection = 0;
+      showPowerBase();
+      break;
+      
+    case STATE_DISPLAY_SETTINGS:
+    case STATE_SYSTEM_INFO:
+    case STATE_DEVELOPER_MODE:
+      currentState = STATE_SETTINGS_MENU;
+      settingsMenuSelection = 0;
+      showSettingsMenu();
+      break;
+      
+    case STATE_ESP_NOW_SEND:
+    case STATE_ESP_NOW_INBOX:
+    case STATE_ESP_NOW_PEERS:
+      currentState = STATE_ESP_NOW_MENU;
+      menuSelection = 0;
+      showESPNowMenu();
+      break;
+      
+    case STATE_KEYBOARD:
+    case STATE_API_SELECT:
+    case STATE_CHAT_RESPONSE:
+      currentState = STATE_MAIN_MENU;
+      menuSelection = 0;
+      userInput = "";
+      aiResponse = "";
+      showMainMenu();
+      break;
+      
+    default:
+      currentState = STATE_MAIN_MENU;
+      menuSelection = 0;
+      showMainMenu();
+      break;
+  }
+}
+
+// ========== CONTINUATION OF EXISTING FUNCTIONS ==========
+
+void showPowerBase() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(15, 2);
+  display.print("POWER CENTRAL");
+  
+  drawIcon(2, 2, ICON_POWER);
+  
+  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
+  
+  const char* menuItems[] = {
+    "Battery Visual",
+    "Statistics",
+    "Power Graph",
+    "Consumption",
+    "Back"
+  };
+  
+  for (int i = 0; i < 5; i++) {
+    display.setCursor(10, 16 + i * 9);
+    if (i == powerMenuSelection) {
+      display.print("> ");
+    } else {
+      display.print("  ");
+    }
+    display.print(menuItems[i]);
+  }
+  
+  display.display();
+}
+
+void handlePowerBaseSelect() {
+  previousState = currentState;
+  
+  switch(powerMenuSelection) {
+    case 0:
+      currentState = STATE_POWER_VISUAL;
+      showPowerVisual();
+      break;
+    case 1:
+      currentState = STATE_POWER_STATS;
+      showPowerStats();
+      break;
+    case 2:
+      currentState = STATE_POWER_GRAPH;
+      showPowerGraph();
+      break;
+    case 3:
+      currentState = STATE_POWER_CONSUMPTION;
+      showPowerConsumption();
+      break;
+    case 4:
+      currentState = STATE_MAIN_MENU;
+      menuSelection = 0;
+      showMainMenu();
+      break;
+  }
+}
+
+void showPowerVisual() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  int battX = 20;
+  int battY = 14;
+  int battW = 70;
+  int battH = 36;
+  
+  display.fillRect(battX + 2, battY + 2, battW, battH, SSD1306_WHITE);
+  display.fillRect(battX, battY, battW, battH, SSD1306_BLACK);
+  
+  display.drawRect(battX, battY, battW, battH, SSD1306_WHITE);
+  display.drawRect(battX + 1, battY + 1, battW - 2, battH - 2, SSD1306_WHITE);
+  
+  display.fillRect(battX + battW, battY + 13, 7, 10, SSD1306_WHITE);
+  
+  int fillW = map(batteryPercent, 0, 100, 0, battW - 10);
+  
+  if (isCharging) {
+    int waveSpeed = (millis() / 60) % 30;
+    for (int i = 0; i < fillW; i++) {
+      int wave = abs(((i - waveSpeed) % 30) - 15);
+      if (wave < 8) {
+        int height = map(wave, 0, 8, battH - 10, 4);
+        display.drawLine(battX + 5 + i, battY + 5, 
+                        battX + 5 + i, battY + 5 + height, SSD1306_WHITE);
+      }
+    }
+  } else {
+    for (int i = 0; i < fillW; i += 2) {
+      display.drawLine(battX + 5 + i, battY + 5,
+                      battX + 5 + i, battY + battH - 5, SSD1306_WHITE);
+    }
+  }
+  
+  display.setTextSize(2);
+  String percentText = String(batteryPercent) + "%";
+  int textW = percentText.length() * 12;
+  int textX = battX + (battW - textW) / 2;
+  int textY = battY + (battH - 16) / 2;
+  
+  display.setTextColor(SSD1306_BLACK);
+  display.setCursor(textX, textY);
+  display.print(percentText);
+  
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(2, 54);
+  display.print(batteryVoltage, 2);
+  display.print("V");
+  
+  display.setCursor(45, 54);
+  if (isCharging) {
+    display.print("CHARGING");
+  } else {
+    if (batteryPercent > 80) display.print("FULL");
+    else if (batteryPercent > 20) display.print("GOOD");
+    else display.print("LOW!");
+  }
+  
+  display.display();
+}
+
+void showPowerStats() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(15, 2);
+  display.print("POWER STATS");
+  
+  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
+  
+  display.setCursor(2, 16);
+  display.print("Voltage:");
+  display.setCursor(70, 16);
+  display.print(batteryVoltage, 3);
+  display.print(" V");
+  
+  display.setCursor(2, 26);
+  display.print("Battery:");
+  display.setCursor(70, 26);
+  display.print(batteryPercent);
+  display.print(" %");
+  
+  display.setCursor(2, 36);
+  display.print("Status:");
+  display.setCursor(70, 36);
+  display.print(isCharging ? "CHARGING" : "DISCHARGING");
+  
+  display.setCursor(2, 46);
+  display.print("Power:");
+  display.setCursor(70, 46);
+  display.print(totalPowerDraw, 0);
+  display.print(" mA");
+  
+  display.display();
+}
+
+void showPowerGraph() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(25, 2);
+  display.print("POWER GRAPH");
+  
+  int graphX = 10;
+  int graphY = 15;
+  int graphW = 108;
+  int graphH = 40;
+  
+  display.drawLine(graphX, graphY, graphX, graphY + graphH, SSD1306_WHITE);
+  display.drawLine(graphX, graphY + graphH, graphX + graphW, graphY + graphH, SSD1306_WHITE);
+  
+  int dataPoints = batteryHistoryFilled ? BATTERY_HISTORY_SIZE : batteryHistoryIndex;
+  if (dataPoints > 1) {
+    int startIdx = batteryHistoryFilled ? batteryHistoryIndex : 0;
+    
+    for (int i = 0; i < dataPoints - 1; i++) {
+      int idx1 = (startIdx + i) % BATTERY_HISTORY_SIZE;
+      int idx2 = (startIdx + i + 1) % BATTERY_HISTORY_SIZE;
+      
+      int x1 = graphX + (i * graphW / (dataPoints - 1));
+      int y1 = graphY + graphH - (batteryHistory[idx1] * graphH / 100);
+      int x2 = graphX + ((i + 1) * graphW / (dataPoints - 1));
+      int y2 = graphY + graphH - (batteryHistory[idx2] * graphH / 100);
+      
+      display.drawLine(x1, y1, x2, y2, SSD1306_WHITE);
+    }
+  }
+  
+  display.setCursor(40, 58);
+  display.print("Now: ");
+  display.print(batteryPercent);
+  display.print("%");
+  
+  display.display();
+}
+
+void showWiFiMenu() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(25, 2);
   display.print("WiFi MENU");
   
-  drawIcon(x_offset + 10, 2, ICON_WIFI);
+  drawIcon(10, 2, ICON_WIFI);
   
-  display.drawLine(x_offset + 0, 12, x_offset + SCREEN_WIDTH, 12, SSD1306_WHITE);
+  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
   
-  display.setCursor(x_offset + 5, 16);
+  display.setCursor(5, 16);
   if (WiFi.status() == WL_CONNECTED) {
     display.print("Connected:");
     display.setCursor(5, 24);
@@ -1770,7 +1920,9 @@ void handleWiFiMenuSelect() {
       forgetNetwork();
       break;
     case 2:
-      changeState(STATE_MAIN_MENU);
+      currentState = STATE_MAIN_MENU;
+      menuSelection = 0;
+      showMainMenu();
       break;
   }
 }
@@ -1812,15 +1964,17 @@ void scanWiFiNetworks() {
   
   selectedNetwork = 0;
   wifiPage = 0;
-  changeState(STATE_WIFI_SCAN);
+  currentState = STATE_WIFI_SCAN;
+  displayWiFiNetworks();
 }
 
-void displayWiFiNetworks(int x_offset) {
+void displayWiFiNetworks() {
   display.clearDisplay();
   drawBatteryIndicator();
+  drawBreadcrumb();
   
   display.setTextSize(1);
-  display.setCursor(x_offset + 5, 0);
+  display.setCursor(5, 0);
   display.print("WiFi (");
   display.print(networkCount);
   display.print(")");
@@ -1867,6 +2021,7 @@ void displayWiFiNetworks(int x_offset) {
       display.setTextColor(SSD1306_WHITE);
     }
     
+    // Page indicator
     if (networkCount > wifiPerPage) {
       display.setCursor(45, 56);
       display.print("Pg ");
@@ -1879,17 +2034,145 @@ void displayWiFiNetworks(int x_offset) {
   display.display();
 }
 
-// ========== API SELECT ==========
-
-void showAPISelect(int x_offset) {
+void showCalculator() {
   display.clearDisplay();
   drawBatteryIndicator();
+  drawBreadcrumb();
   
   display.setTextSize(1);
-  display.setCursor(x_offset + 15, 5);
+  display.setCursor(30, 2);
+  display.print("CALCULATOR");
+  
+  drawIcon(15, 2, ICON_CALC);
+  
+  display.drawRect(2, 12, SCREEN_WIDTH - 4, 12, SSD1306_WHITE);
+  display.setCursor(6, 15);
+  String displayText = calcDisplay;
+  if (displayText.length() > 18) {
+    displayText = displayText.substring(displayText.length() - 18);
+  }
+  display.print(displayText);
+  
+  const char* calcPad[4][4] = {
+    {"7", "8", "9", "/"},
+    {"4", "5", "6", "*"},
+    {"1", "2", "3", "-"},
+    {"C", "0", "=", "+"}
+  };
+  
+  int startY = 28;
+  for (int row = 0; row < 4; row++) {
+    for (int col = 0; col < 4; col++) {
+      int x = col * 30 + 4;
+      int y = startY + row * 9;
+      
+      if (row == cursorY && col == cursorX) {
+        display.fillRect(x - 2, y - 1, 16, 8, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.setTextColor(SSD1306_WHITE);
+      }
+      
+      display.setCursor(x, y);
+      display.print(calcPad[row][col]);
+    }
+  }
+  
+  display.setTextColor(SSD1306_WHITE);
+  display.display();
+}
+
+void handleCalculatorInput() {
+  const char* calcPad[4][4] = {
+    {"7", "8", "9", "/"},
+    {"4", "5", "6", "*"},
+    {"1", "2", "3", "-"},
+    {"C", "0", "=", "+"}
+  };
+  
+  String key = calcPad[cursorY][cursorX];
+  
+  if (key == "C") {
+    resetCalculator();
+  } else if (key == "=") {
+    calculateResult();
+  } else if (key == "+" || key == "-" || key == "*" || key == "/") {
+    if (calcDisplay != "0" && calcDisplay != "Error") {
+      calcNumber1 = calcDisplay;
+      calcOperator = key.charAt(0);
+      calcNewNumber = true;
+    }
+  } else {
+    if (calcNewNumber || calcDisplay == "0" || calcDisplay == "Error") {
+      calcDisplay = key;
+      calcNewNumber = false;
+    } else {
+      if (calcDisplay.length() < 12) {
+        calcDisplay += key;
+      }
+    }
+  }
+  
+  showCalculator();
+}
+
+void calculateResult() {
+  if (calcNumber1.length() > 0 && calcOperator != ' ') {
+    float num1 = calcNumber1.toFloat();
+    float num2 = calcDisplay.toFloat();
+    float result = 0;
+    
+    switch(calcOperator) {
+      case '+': result = num1 + num2; break;
+      case '-': result = num1 - num2; break;
+      case '*': result = num1 * num2; break;
+      case '/':
+        if (num2 != 0) {
+          result = num1 / num2;
+        } else {
+          ledError();
+          calcDisplay = "Error";
+          calcNumber1 = "";
+          calcOperator = ' ';
+          calcNewNumber = true;
+          return;
+        }
+        break;
+    }
+    
+    ledSuccess();
+    
+    calcDisplay = String(result, 2);
+    while (calcDisplay.endsWith("0") && calcDisplay.indexOf('.') != -1) {
+      calcDisplay.remove(calcDisplay.length() - 1);
+    }
+    if (calcDisplay.endsWith(".")) {
+      calcDisplay.remove(calcDisplay.length() - 1);
+    }
+    
+    calcNumber1 = "";
+    calcOperator = ' ';
+    calcNewNumber = true;
+  }
+}
+
+void resetCalculator() {
+  calcDisplay = "0";
+  calcNumber1 = "";
+  calcOperator = ' ';
+  calcNewNumber = true;
+}
+
+void showAPISelect() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  drawBreadcrumb();
+  
+  display.setTextSize(1);
+  display.setCursor(15, 5);
   display.print("SELECT GEMINI API");
   
-  display.drawLine(x_offset + 0, 15, x_offset + SCREEN_WIDTH, 15, SSD1306_WHITE);
+  display.drawLine(0, 15, SCREEN_WIDTH, 15, SSD1306_WHITE);
   
   int y1 = 25;
   if (menuSelection == 0) {
@@ -1930,433 +2213,680 @@ void handleAPISelectSelect() {
   ledSuccess();
   
   userInput = "";
-  keyboardContext = CONTEXT_CHAT;
+  currentState = STATE_KEYBOARD;
   cursorX = 0;
   cursorY = 0;
   currentKeyboardMode = MODE_LOWER;
-  changeState(STATE_KEYBOARD);
+  drawKeyboard();
 }
 
-// ========== MAIN MENU ==========
-
-void showMainMenu(int x_offset) {
+void drawKeyboard() {
   display.clearDisplay();
-  
-  struct MenuItem {
-    const char* text;
-    const unsigned char* icon;
-  };
-  
-  MenuItem menuItems[] = {
-    {"Chat AI", ICON_CHAT},
-    {"WiFi", ICON_WIFI},
-    {"Games", ICON_GAME},
-    {"Video", ICON_VIDEO}
-  };
-  
-  int numItems = sizeof(menuItems) / sizeof(MenuItem);
-  int screenCenterY = SCREEN_HEIGHT / 2;
-  
-  for (int i = 0; i < numItems; i++) {
-    float itemY = screenCenterY + (i * 22) - menuScrollY;
-    float distance = abs(itemY - screenCenterY);
-    
-    // Simple easing function for scaling
-    float scale = 1.0 - (distance / (SCREEN_HEIGHT / 2.0));
-    scale = max(0.5f, scale); // Min scale
-
-    if (itemY > -20 && itemY < SCREEN_HEIGHT + 20) {
-      int itemX = x_offset + 20 + (distance / 2.5);
-
-      if (i == menuSelection) {
-        // Highlighted item
-        display.drawRoundRect(x_offset + 5, screenCenterY - 12, SCREEN_WIDTH - 10, 24, 6, SSD1306_WHITE);
-        drawIcon(x_offset + 12, screenCenterY - 4, menuItems[i].icon);
-        display.setTextSize(2);
-        display.setCursor(x_offset + 30, screenCenterY - 7);
-        display.print(menuItems[i].text);
-      } else {
-        // Other items
-        display.setTextSize(1);
-        display.setCursor(itemX, itemY - 3);
-        display.print(menuItems[i].text);
-      }
-    }
-  }
-
-  // Top and bottom status bar (fixed position)
   drawBatteryIndicator();
-  if (WiFi.status() == WL_CONNECTED) {
-    drawWiFiSignalBars();
-  }
   
-  display.display();
-}
-
-void handleMainMenuSelect() {
-  mainMenuSelection = menuSelection;
-  switch(mainMenuSelection) {
-    case 0: // Chat AI
-      if (WiFi.status() == WL_CONNECTED) {
-        changeState(STATE_API_SELECT);
-      } else {
-        ledError();
-        showStatus("WiFi not connected!\nGo to WiFi Settings", 2000);
-      }
-      break;
-    case 1: // WiFi
-      changeState(STATE_WIFI_MENU);
-      break;
-    case 2: // Games
-      changeState(STATE_GAME_SELECT);
-      break;
-    case 3: // Video Player
-      videoCurrentFrame = 0;
-      changeState(STATE_VIDEO_PLAYER);
-      break;
-  }
-}
-
-void drawVideoPlayer() {
-  // Simple frame timing
-  if (millis() - lastVideoFrameTime > videoFrameDelay) {
-    lastVideoFrameTime = millis();
-
-    display.clearDisplay();
-
-    if (videoTotalFrames > 0 && videoFrames[0] != NULL) {
-      display.drawBitmap(0, 0, videoFrames[videoCurrentFrame], SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
-
-      videoCurrentFrame++;
-      if (videoCurrentFrame >= videoTotalFrames) {
-        videoCurrentFrame = 0;
-      }
-    } else {
-      display.setCursor(10, 20);
-      display.setTextSize(1);
-      display.println("No Video Data");
-      display.setCursor(10, 35);
-      display.println("Add frames to code");
-    }
-
-    display.display();
-  }
-}
-
-// ========== UTILITY FUNCTIONS ==========
-
-void drawBatteryIndicator() {
-  int battX = SCREEN_WIDTH - 22;
-  int battY = 2;
-
-  display.drawRect(battX, battY, 18, 8, SSD1306_WHITE);
-  display.fillRect(battX + 18, battY + 2, 2, 4, SSD1306_WHITE);
-
-  int fill = map(batteryPercent, 0, 100, 0, 14);
-  if (fill > 0) {
-    display.fillRect(battX + 2, battY + 2, fill, 4, SSD1306_WHITE);
-  }
-}
-
-void drawWiFiSignalBars() {
-  int rssi = WiFi.RSSI();
-  int bars = 0;
-
-  if (rssi > -55) bars = 4;
-  else if (rssi > -65) bars = 3;
-  else if (rssi > -75) bars = 2;
-  else if (rssi > -85) bars = 1;
-
-  int x = SCREEN_WIDTH - 35;
-  int y = 8;
-
-  for (int i = 0; i < 4; i++) {
-    int h = (i + 1) * 2;
-    if (i < bars) {
-      display.fillRect(x + (i * 3), y - h + 2, 2, h, SSD1306_WHITE);
-    } else {
-      display.drawRect(x + (i * 3), y - h + 2, 2, h, SSD1306_WHITE);
-    }
-  }
-}
-
-void drawIcon(int x, int y, const unsigned char* icon) {
-  display.drawBitmap(x, y, icon, 8, 8, SSD1306_WHITE);
-}
-
-void showStatus(String message, int delayMs) {
-  int boxW = SCREEN_WIDTH - 20;
-  int boxH = 40;
-  int boxX = 10;
-  int boxY = (SCREEN_HEIGHT - boxH) / 2;
-
-  display.fillRect(boxX, boxY, boxW, boxH, SSD1306_BLACK);
-  display.drawRect(boxX, boxY, boxW, boxH, SSD1306_WHITE);
-
-  display.setCursor(boxX + 5, boxY + 5);
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-
-  display.print(message);
-  display.display();
-
-  if (delayMs > 0) {
-    delay(delayMs);
-  }
-}
-
-void showProgressBar(String title, int percent) {
-  display.clearDisplay();
-  display.setTextSize(1);
   display.setCursor(0, 0);
-  display.print(title);
-
-  int barX = 10;
-  int barY = 30;
-  int barW = SCREEN_WIDTH - 20;
-  int barH = 10;
-
-  display.drawRect(barX, barY, barW, barH, SSD1306_WHITE);
-
-  int fillW = map(percent, 0, 100, 0, barW - 4);
-  if (fillW > 0) {
-    display.fillRect(barX + 2, barY + 2, fillW, barH - 4, SSD1306_WHITE);
+  
+  if (currentState == STATE_PASSWORD_INPUT) {
+    display.print("Pass:");
+    String masked = "";
+    for (unsigned int i = 0; i < passwordInput.length(); i++) {
+      masked += "*";
+    }
+    String displayText = masked.substring(max(0, (int)masked.length() - 10));
+    display.print(displayText);
+  } else {
+    display.print(">");
+    String displayText = userInput.substring(max(0, (int)userInput.length() - 14));
+    display.print(displayText);
   }
-
-  display.setCursor(SCREEN_WIDTH / 2 - 10, barY + 15);
-  display.print(percent);
-  display.print("%");
-
-  display.display();
-}
-
-void showLoadingAnimation(int x_offset) {
-  display.clearDisplay();
-  drawBatteryIndicator();
-
-  display.setCursor(x_offset + 35, 25);
-  display.print("Loading...");
-
-  int cx = SCREEN_WIDTH / 2;
-  int cy = SCREEN_HEIGHT / 2 + 10;
-  int r = 10;
-
-  for (int i = 0; i < 8; i++) {
-    float angle = (loadingFrame + i) * (2 * PI / 8);
-    int x = cx + cos(angle) * r;
-    int y = cy + sin(angle) * r;
-
-    if (i == 0) {
-      display.fillCircle(x, y, 2, SSD1306_WHITE);
-    } else {
-      display.drawPixel(x, y, SSD1306_WHITE);
+  
+  display.setCursor(SCREEN_WIDTH - 18, 0);
+  if (currentKeyboardMode == MODE_UPPER) {
+    display.print("A");
+  } else if (currentKeyboardMode == MODE_NUMBERS) {
+    display.print("#");
+  } else {
+    display.print("a");
+  }
+  
+  display.drawLine(0, 10, SCREEN_WIDTH, 10, SSD1306_WHITE);
+  
+  int startY = 14;
+  const char* currentKeyboard[3][10];
+  
+  switch(currentKeyboardMode) {
+    case MODE_LOWER:
+      memcpy(currentKeyboard, keyboardLower, sizeof(keyboardLower));
+      break;
+    case MODE_UPPER:
+      memcpy(currentKeyboard, keyboardUpper, sizeof(keyboardUpper));
+      break;
+    case MODE_NUMBERS:
+      memcpy(currentKeyboard, keyboardNumbers, sizeof(keyboardNumbers));
+      break;
+  }
+  
+  for (int row = 0; row < 3; row++) {
+    for (int col = 0; col < 10; col++) {
+      int x = col * 12 + 2;
+      int y = startY + row * 16;
+      
+      if (row == cursorY && col == cursorX) {
+        display.fillRect(x - 1, y - 1, 11, 10, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.setTextColor(SSD1306_WHITE);
+      }
+      
+      display.setCursor(x, y);
+      
+      const char* key = currentKeyboard[row][col];
+      
+      if (strcmp(key, "OK") == 0) {
+        display.print("OK");
+      } else if (strcmp(key, "<") == 0) {
+        display.print("<");
+      } else if (strcmp(key, "#") == 0) {
+        display.print("#");
+      } else if (strcmp(key, " ") == 0) {
+        display.print("_");
+      } else {
+        display.print(key);
+      }
     }
   }
-
+  
   display.display();
 }
 
-void forgetNetwork() {
-  WiFi.disconnect(true, true);
-  preferences.begin("wifi-creds", false);
-  preferences.clear();
-  preferences.end();
-
-  showStatus("Network forgotten", 1500);
-  scanWiFiNetworks();
-}
-
-void connectToWiFi(String ssid, String password) {
-  showProgressBar("Connecting...", 0);
-
-  WiFi.begin(ssid.c_str(), password.c_str());
-
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    attempts++;
-    showProgressBar("Connecting...", attempts * 5);
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    preferences.begin("wifi-creds", false);
-    preferences.putString("ssid", ssid);
-    preferences.putString("password", password);
-    preferences.end();
-
-    showStatus("Connected!", 1500);
-    changeState(STATE_MAIN_MENU);
-  } else {
-    showStatus("Failed!", 1500);
-    changeState(STATE_WIFI_MENU);
-  }
-}
-
-// ========== KEYBOARD FUNCTIONS ==========
-
 const char* getCurrentKey() {
-  if (currentKeyboardMode == MODE_LOWER) {
-    return keyboardLower[cursorY][cursorX];
-  } else if (currentKeyboardMode == MODE_UPPER) {
-    return keyboardUpper[cursorY][cursorX];
-  } else {
-    return keyboardNumbers[cursorY][cursorX];
+  switch(currentKeyboardMode) {
+    case MODE_LOWER:
+      return keyboardLower[cursorY][cursorX];
+    case MODE_UPPER:
+      return keyboardUpper[cursorY][cursorX];
+    case MODE_NUMBERS:
+      return keyboardNumbers[cursorY][cursorX];
+    default:
+      return keyboardLower[cursorY][cursorX];
   }
 }
 
 void toggleKeyboardMode() {
-  if (currentKeyboardMode == MODE_LOWER) {
-    currentKeyboardMode = MODE_UPPER;
-  } else if (currentKeyboardMode == MODE_UPPER) {
-    currentKeyboardMode = MODE_NUMBERS;
-  } else {
-    currentKeyboardMode = MODE_LOWER;
+  switch(currentKeyboardMode) {
+    case MODE_LOWER:
+      currentKeyboardMode = MODE_UPPER;
+      break;
+    case MODE_UPPER:
+      currentKeyboardMode = MODE_NUMBERS;
+      break;
+    case MODE_NUMBERS:
+      currentKeyboardMode = MODE_LOWER;
+      break;
   }
-}
-
-void drawKeyboard(int x_offset) {
-  display.clearDisplay();
-  drawBatteryIndicator();
-
-  display.drawRect(x_offset + 2, 2, SCREEN_WIDTH - 4, 14, SSD1306_WHITE);
-
-  display.setCursor(x_offset + 5, 5);
-  String displayText = "";
-  if (keyboardContext == CONTEXT_WIFI_PASSWORD) {
-     for(unsigned int i=0; i<passwordInput.length(); i++) displayText += "*";
-  } else {
-     displayText = userInput;
-  }
-
-  int maxChars = 18;
-  if (displayText.length() > maxChars) {
-      displayText = displayText.substring(displayText.length() - maxChars);
-  }
-  display.print(displayText);
-
-  int startY = 20;
-  int keyW = 11;
-  int keyH = 10;
-  int gap = 1;
-
-  for (int r = 0; r < 3; r++) {
-    for (int c = 0; c < 10; c++) {
-      int x = 2 + c * (keyW + gap);
-      int y = startY + r * (keyH + gap);
-
-      const char* keyLabel;
-      if (currentKeyboardMode == MODE_LOWER) {
-         keyLabel = keyboardLower[r][c];
-      } else if (currentKeyboardMode == MODE_UPPER) {
-         keyLabel = keyboardUpper[r][c];
-      } else {
-         keyLabel = keyboardNumbers[r][c];
-      }
-
-      if (r == cursorY && c == cursorX) {
-        display.fillRect(x, y, keyW, keyH, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK);
-      } else {
-        display.drawRect(x, y, keyW, keyH, SSD1306_WHITE);
-        display.setTextColor(SSD1306_WHITE);
-      }
-
-      display.setCursor(x + 3, y + 1);
-      display.print(keyLabel);
-    }
-  }
-
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(2, 56);
-  display.print("SEL:Type #:Mode");
-
-  display.display();
 }
 
 void handleKeyPress() {
   const char* key = getCurrentKey();
-
+  
   if (strcmp(key, "OK") == 0) {
-    if (keyboardContext == CONTEXT_CHAT) {
+    if (userInput.length() > 0) {
       sendToGemini();
     }
   } else if (strcmp(key, "<") == 0) {
     if (userInput.length() > 0) {
       userInput.remove(userInput.length() - 1);
     }
+    drawKeyboard();
   } else if (strcmp(key, "#") == 0) {
     toggleKeyboardMode();
+    drawKeyboard();
   } else {
     userInput += key;
+    if (currentKeyboardMode == MODE_UPPER) {
+      currentKeyboardMode = MODE_LOWER;
+    }
+    drawKeyboard();
   }
 }
 
 void handlePasswordKeyPress() {
   const char* key = getCurrentKey();
-
+  
   if (strcmp(key, "OK") == 0) {
-    connectToWiFi(selectedSSID, passwordInput);
+    if (passwordInput.length() > 0 || !networks[selectedNetwork].encrypted) {
+      connectToWiFi(selectedSSID, passwordInput);
+    }
   } else if (strcmp(key, "<") == 0) {
     if (passwordInput.length() > 0) {
       passwordInput.remove(passwordInput.length() - 1);
     }
+    drawKeyboard();
   } else if (strcmp(key, "#") == 0) {
     toggleKeyboardMode();
+    drawKeyboard();
   } else {
     passwordInput += key;
+    if (currentKeyboardMode == MODE_UPPER) {
+      currentKeyboardMode = MODE_LOWER;
+    }
+    drawKeyboard();
   }
 }
 
-// ========== INPUT HANDLING ==========
+void connectToWiFi(String ssid, String password) {
+  showProgressBar("Connecting", 0);
+  
+  WiFi.disconnect();
+  delay(100);
+  WiFi.begin(ssid.c_str(), password.c_str());
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    ledBlink(100);
+    delay(500);
+    attempts++;
+    showProgressBar("Connecting", attempts * 3);
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    preferences.putString("ssid", ssid);
+    preferences.putString("password", password);
+    
+    ledSuccess();
+    showProgressBar("Connected!", 100);
+    delay(1000);
+    
+    lastWiFiActivity = millis();
+    
+    currentState = STATE_MAIN_MENU;
+    menuSelection = 0;
+    showMainMenu();
+  } else {
+    ledError();
+    showStatus("Connection failed!", 2000);
+    currentState = STATE_WIFI_SCAN;
+    displayWiFiNetworks();
+  }
+}
+
+void forgetNetwork() {
+  preferences.clear();
+  WiFi.disconnect();
+  showStatus("Network forgotten!", 2000);
+  showWiFiMenu();
+}
+
+void checkWiFiTimeout() {
+  if (millis() - lastWiFiActivity > wifiTimeout) {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    showStatus("WiFi Auto-Off\nTimeout reached", 2000);
+    showMainMenu();
+  }
+}
+
+void sendToGemini() {
+  currentState = STATE_LOADING;
+  loadingFrame = 0;
+  lastLoadingUpdate = millis();
+  
+  for (int i = 0; i < 5; i++) {
+    showLoadingAnimation();
+    delay(100);
+    loadingFrame++;
+  }
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    ledError();
+    aiResponse = "WiFi not connected!";
+    currentState = STATE_CHAT_RESPONSE;
+    scrollOffset = 0;
+    displayResponse();
+    return;
+  }
+  
+  const char* currentApiKey = (selectedAPIKey == 1) ? geminiApiKey1 : geminiApiKey2;
+  
+  HTTPClient http;
+  String url = String(geminiEndpoint) + "?key=" + currentApiKey;
+  
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(15000);
+  
+  String escapedInput = userInput;
+  escapedInput.replace("\\", "\\\\");
+  escapedInput.replace("\"", "\\\"");
+  escapedInput.replace("\n", "\\n");
+  
+  String jsonPayload = "{\"contents\":[{\"parts\":[{\"text\":\"" + escapedInput + "\"}]}]}";
+  
+  int httpResponseCode = http.POST(jsonPayload);
+  
+  if (httpResponseCode == 200) {
+    String response = http.getString();
+    
+    StaticJsonDocument<16384> responseDoc;
+    DeserializationError error = deserializeJson(responseDoc, response);
+    
+    if (!error && responseDoc.containsKey("candidates")) {
+      JsonArray candidates = responseDoc["candidates"];
+      if (candidates.size() > 0) {
+        JsonObject content = candidates[0]["content"];
+        JsonArray parts = content["parts"];
+        if (parts.size() > 0) {
+          aiResponse = parts[0]["text"].as<String>();
+          ledSuccess();
+        } else {
+          aiResponse = "Error: Empty response";
+        }
+      } else {
+        aiResponse = "Error: No candidates";
+      }
+    } else {
+      ledError();
+      aiResponse = "JSON Error";
+    }
+  } else {
+    ledError();
+    aiResponse = "HTTP Error " + String(httpResponseCode);
+  }
+  
+  http.end();
+  lastWiFiActivity = millis();
+  
+  currentState = STATE_CHAT_RESPONSE;
+  scrollOffset = 0;
+  displayResponse();
+}
+
+void displayResponse() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  
+  int y = 12 - scrollOffset;
+  int lineHeight = 10;
+  String word = "";
+  int x = 0;
+  
+  for (unsigned int i = 0; i < aiResponse.length(); i++) {
+    char c = aiResponse.charAt(i);
+    
+    if (c == ' ' || c == '\n' || i == aiResponse.length() - 1) {
+      if (i == aiResponse.length() - 1 && c != ' ' && c != '\n') {
+        word += c;
+      }
+      
+      int wordWidth = word.length() * 6;
+      
+      if (x + wordWidth > SCREEN_WIDTH - 10) {
+        y += lineHeight;
+        x = 0;
+      }
+      
+      if (y >= -lineHeight && y < SCREEN_HEIGHT) {
+        display.setCursor(x, y);
+        display.print(word);
+      }
+      
+      x += wordWidth + 6;
+      word = "";
+      
+      if (c == '\n') {
+        y += lineHeight;
+        x = 0;
+      }
+    } else {
+      word += c;
+    }
+  }
+  
+  display.display();
+}
+
+void showLoadingAnimation() {
+  display.clearDisplay();
+  drawBatteryIndicator();
+  
+  display.setTextSize(1);
+  display.setCursor(20, 10);
+  display.print("Loading AI");
+  
+  int dots = (loadingFrame % 4);
+  for (int i = 0; i < dots; i++) {
+    display.print(".");
+  }
+  
+  int centerX = SCREEN_WIDTH / 2;
+  int centerY = 35;
+  int radius = 12;
+  
+  display.drawCircle(centerX, centerY, radius, SSD1306_WHITE);
+  
+  float angle = loadingFrame * PI / 4;
+  int x2 = centerX + cos(angle) * radius;
+  int y2 = centerY + sin(angle) * radius;
+  
+  display.drawLine(centerX, centerY, x2, y2, SSD1306_WHITE);
+  
+  display.display();
+}
+
+void showProgressBar(String title, int percent) {
+  display.clearDisplay();
+  
+  display.setTextSize(1);
+  int titleW = title.length() * 6;
+  display.setCursor((SCREEN_WIDTH - titleW) / 2, 15);
+  display.print(title);
+  
+  int barX = 10;
+  int barY = 30;
+  int barW = SCREEN_WIDTH - 20;
+  int barH = 12;
+  
+  display.drawRect(barX, barY, barW, barH, SSD1306_WHITE);
+  
+  int fillW = map(percent, 0, 100, 0, barW - 4);
+  display.fillRect(barX + 2, barY + 2, fillW, barH - 4, SSD1306_WHITE);
+  
+  display.setCursor(55, 47);
+  display.print(percent);
+  display.print("%");
+  
+  display.display();
+}
+
+void showStatus(String message, int delayMs) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  
+  int y = 20;
+  int x = 0;
+  String word = "";
+  
+  for (unsigned int i = 0; i < message.length(); i++) {
+    char c = message.charAt(i);
+    
+    if (c == '\n') {
+      display.setCursor(x, y);
+      display.print(word);
+      word = "";
+      y += 10;
+      x = 0;
+    } else if (c == ' ') {
+      word += c;
+      int wordWidth = word.length() * 6;
+      if (x + wordWidth > SCREEN_WIDTH) {
+        y += 10;
+        x = 0;
+      }
+      display.setCursor(x, y);
+      display.print(word);
+      x += wordWidth;
+      word = "";
+    } else {
+      word += c;
+    }
+  }
+  
+  if (word.length() > 0) {
+    display.setCursor(x, y);
+    display.print(word);
+  }
+  
+  display.display();
+  delay(delayMs);
+}
+
+void refreshCurrentScreen() {
+  switch(currentState) {
+    case STATE_MAIN_MENU:
+      showMainMenu();
+      break;
+    case STATE_WIFI_MENU:
+      showWiFiMenu();
+      break;
+    case STATE_WIFI_SCAN:
+      displayWiFiNetworks();
+      break;
+    case STATE_CALCULATOR:
+      showCalculator();
+      break;
+    case STATE_POWER_BASE:
+      showPowerBase();
+      break;
+    case STATE_POWER_VISUAL:
+      showPowerVisual();
+      break;
+    case STATE_POWER_STATS:
+      showPowerStats();
+      break;
+    case STATE_POWER_GRAPH:
+      showPowerGraph();
+      break;
+    case STATE_POWER_CONSUMPTION:
+      showPowerConsumption();
+      break;
+    case STATE_API_SELECT:
+      showAPISelect();
+      break;
+    case STATE_SYSTEM_INFO:
+      showSystemInfo();
+      break;
+    case STATE_SETTINGS_MENU:
+      showSettingsMenu();
+      break;
+    case STATE_DISPLAY_SETTINGS:
+      showDisplaySettings();
+      break;
+    case STATE_DEVELOPER_MODE:
+      showDeveloperMode();
+      break;
+    case STATE_BATTERY_GUARDIAN:
+      showBatteryGuardian();
+      break;
+    case STATE_ESP_NOW_MENU:
+      showESPNowMenu();
+      break;
+    case STATE_ESP_NOW_SEND:
+      showESPNowSend();
+      break;
+    case STATE_ESP_NOW_INBOX:
+      showESPNowInbox();
+      break;
+    case STATE_ESP_NOW_PEERS:
+      showESPNowPeers();
+      break;
+    case STATE_KEYBOARD:
+    case STATE_PASSWORD_INPUT:
+      drawKeyboard();
+      break;
+    case STATE_CHAT_RESPONSE:
+      displayResponse();
+      break;
+  }
+}
+
+void updateBatteryLevel() {
+  int adcSum = 0;
+  for (int i = 0; i < 10; i++) {
+    adcSum += analogRead(BATTERY_PIN);
+    delay(5);
+  }
+  int adcValue = adcSum / 10;
+  
+  float adcVoltage = (adcValue / 4095.0) * 3.3;
+  batteryVoltage = adcVoltage * VOLTAGE_DIVIDER_RATIO;
+  
+  batteryPercent = map(batteryVoltage * 100, BATTERY_MIN_VOLTAGE * 100, BATTERY_MAX_VOLTAGE * 100, 0, 100);
+  batteryPercent = constrain(batteryPercent, 0, 100);
+  
+  int chargingSum = 0;
+  for (int i = 0; i < 5; i++) {
+    chargingSum += analogRead(CHARGING_PIN);
+    delay(2);
+  }
+  int chargingValue = chargingSum / 5;
+  float chargingVoltage = (chargingValue / 4095.0) * 3.3 * VOLTAGE_DIVIDER_RATIO;
+  
+  isCharging = (chargingVoltage > batteryVoltage + 0.3);
+}
+
+void drawBatteryIndicator() {
+  int battX = SCREEN_WIDTH - 24;
+  int battY = 1;
+  int battWidth = 22;
+  int battHeight = 8;
+  
+  display.drawRect(battX, battY, battWidth, battHeight, SSD1306_WHITE);
+  display.fillRect(battX + battWidth, battY + 2, 2, battHeight - 4, SSD1306_WHITE);
+  
+  int fillWidth = map(batteryPercent, 0, 100, 0, battWidth - 4);
+  
+  if (batteryPercent > 20) {
+    display.fillRect(battX + 2, battY + 2, fillWidth, battHeight - 4, SSD1306_WHITE);
+  } else if (batteryPercent > 10) {
+    if ((millis() / 500) % 2 == 0) {
+      display.fillRect(battX + 2, battY + 2, fillWidth, battHeight - 4, SSD1306_WHITE);
+    }
+  } else {
+    if ((millis() / 250) % 2 == 0) {
+      display.fillRect(battX + 2, battY + 2, fillWidth, battHeight - 4, SSD1306_WHITE);
+    }
+  }
+  
+  display.setTextSize(1);
+  
+  String percentText = String(batteryPercent);
+  int textWidth = percentText.length() * 6;
+  int textX = battX + (battWidth - textWidth) / 2;
+  int textY = battY + 1;
+  
+  if (batteryPercent > 50) {
+    display.setTextColor(SSD1306_BLACK);
+  } else {
+    display.setTextColor(SSD1306_WHITE);
+  }
+  
+  display.setCursor(textX, textY);
+  display.print(batteryPercent);
+  
+  if (isCharging) {
+    drawChargingPlug();
+  }
+  
+  display.setTextColor(SSD1306_WHITE);
+}
+
+void drawChargingPlug() {
+  int plugX = SCREEN_WIDTH - 35;
+  int plugY = 2;
+  
+  int anim = (millis() / 200) % 2;
+  
+  display.drawLine(plugX, plugY, plugX, plugY + 2 + anim, SSD1306_WHITE);
+  display.drawLine(plugX + 3, plugY, plugX + 3, plugY + 2 + anim, SSD1306_WHITE);
+  
+  display.drawRect(plugX - 1, plugY + 2, 5, 4, SSD1306_WHITE);
+  display.drawLine(plugX + 1, plugY + 6, plugX + 1, plugY + 7, SSD1306_WHITE);
+  
+  if (anim == 1) {
+    display.drawPixel(plugX - 2, plugY + 4, SSD1306_WHITE);
+    display.drawPixel(plugX + 5, plugY + 3, SSD1306_WHITE);
+  }
+}
+
+void drawWiFiSignalBars() {
+  int rssi = WiFi.RSSI();
+  int bars = 0;
+  
+  if (rssi > -50) bars = 4;
+  else if (rssi > -60) bars = 3;
+  else if (rssi > -70) bars = 2;
+  else if (rssi > -80) bars = 1;
+  
+  int x = 2;
+  int y = 2;
+  
+  for (int i = 0; i < 4; i++) {
+    int barHeight = (i + 1) * 2;
+    if (i < bars) {
+      display.fillRect(x + i * 3, y + (8 - barHeight), 2, barHeight, SSD1306_WHITE);
+    } else {
+      display.drawRect(x + i * 3, y + (8 - barHeight), 2, barHeight, SSD1306_WHITE);
+    }
+  }
+}
+
+// ========== BUTTON HANDLERS ==========
 
 void handleUp() {
   switch(currentState) {
     case STATE_MAIN_MENU:
-      if (menuSelection > 0) {
-        menuSelection--;
-        menuTargetScrollY = menuSelection * 22;
-        menuTextScrollX = 0;
-        lastMenuTextScrollTime = millis();
-      }
+      // Di icon menu, UP tidak digunakan (atau bisa ditambahkan fungsi lain)
       break;
     case STATE_WIFI_MENU:
-      if (menuSelection > 0) {
-        menuSelection--;
+      menuSelection = (menuSelection - 1 + 3) % 3;
+      showWiFiMenu();
+      break;
+    case STATE_POWER_BASE:
+      powerMenuSelection = (powerMenuSelection - 1 + 5) % 5;
+      showPowerBase();
+      break;
+    case STATE_SETTINGS_MENU:
+      settingsMenuSelection = (settingsMenuSelection - 1 + 6) % 6;
+      showSettingsMenu();
+      break;
+    case STATE_DISPLAY_SETTINGS:
+      menuSelection = (menuSelection - 1 + 3) % 3;
+      showDisplaySettings();
+      break;
+    case STATE_API_SELECT:
+      menuSelection = (menuSelection - 1 + 2) % 2;
+      showAPISelect();
+      break;
+    case STATE_ESP_NOW_MENU:
+      menuSelection = (menuSelection - 1 + 4) % 4;
+      showESPNowMenu();
+      break;
+    case STATE_ESP_NOW_SEND:
+      if (peerCount > 0) {
+        selectedPeer = (selectedPeer - 1 + peerCount) % peerCount;
+        showESPNowSend();
+      }
+      break;
+    case STATE_ESP_NOW_INBOX:
+      if (inboxCount > 0) {
+        menuSelection = (menuSelection - 1 + inboxCount) % inboxCount;
+        showESPNowInbox();
       }
       break;
     case STATE_WIFI_SCAN:
-      if (selectedNetwork > 0) {
-        selectedNetwork--;
-        if (selectedNetwork < wifiPage * wifiPerPage) {
-          wifiPage--;
-        }
-      }
-      break;
-    case STATE_GAME_SELECT:
-      if (menuSelection > 0) {
-        menuSelection--;
-      }
-      break;
-    case STATE_API_SELECT:
-      if (menuSelection > 0) {
-        menuSelection--;
+      if (networkCount > 0) {
+        selectedNetwork = (selectedNetwork - 1 + networkCount) % networkCount;
+        wifiPage = selectedNetwork / wifiPerPage;
+        displayWiFiNetworks();
       }
       break;
     case STATE_KEYBOARD:
     case STATE_PASSWORD_INPUT:
-      cursorY--;
-      if (cursorY < 0) cursorY = 2; // Wrap to bottom
+      cursorY = (cursorY - 1 + 3) % 3;
+      drawKeyboard();
+      break;
+    case STATE_CALCULATOR:
+      cursorY = (cursorY - 1 + 4) % 4;
+      showCalculator();
       break;
     case STATE_CHAT_RESPONSE:
-      if (scrollOffset > 0) {
-        scrollOffset -= 10;
-      }
-      break;
-    case STATE_GAME_PONG:
-      // Handled in handlePongInput
-      break;
-    case STATE_GAME_SIDE_SCROLLER:
-      // Handled in handleSideScrollerInput
+      scrollOffset = max(0, scrollOffset - 8);
+      displayResponse();
       break;
   }
 }
@@ -2364,81 +2894,123 @@ void handleUp() {
 void handleDown() {
   switch(currentState) {
     case STATE_MAIN_MENU:
-      if (menuSelection < 3) {
-        menuSelection++;
-        menuTargetScrollY = menuSelection * 22;
-        menuTextScrollX = 0;
-        lastMenuTextScrollTime = millis();
-      }
+      // Di icon menu, DOWN tidak digunakan (atau bisa ditambahkan fungsi lain)
       break;
     case STATE_WIFI_MENU:
-      if (menuSelection < 2) {
-        menuSelection++;
+      menuSelection = (menuSelection + 1) % 3;
+      showWiFiMenu();
+      break;
+    case STATE_POWER_BASE:
+      powerMenuSelection = (powerMenuSelection + 1) % 5;
+      showPowerBase();
+      break;
+    case STATE_SETTINGS_MENU:
+      settingsMenuSelection = (settingsMenuSelection + 1) % 6;
+      showSettingsMenu();
+      break;
+    case STATE_DISPLAY_SETTINGS:
+      menuSelection = (menuSelection + 1) % 3;
+      showDisplaySettings();
+      break;
+    case STATE_API_SELECT:
+      menuSelection = (menuSelection + 1) % 2;
+      showAPISelect();
+      break;
+    case STATE_ESP_NOW_MENU:
+      menuSelection = (menuSelection + 1) % 4;
+      showESPNowMenu();
+      break;
+    case STATE_ESP_NOW_SEND:
+      if (peerCount > 0) {
+        selectedPeer = (selectedPeer + 1) % peerCount;
+        showESPNowSend();
+      }
+      break;
+    case STATE_ESP_NOW_INBOX:
+      if (inboxCount > 0) {
+        menuSelection = (menuSelection + 1) % inboxCount;
+        showESPNowInbox();
       }
       break;
     case STATE_WIFI_SCAN:
-      if (selectedNetwork < networkCount - 1) {
-        selectedNetwork++;
-        if (selectedNetwork >= (wifiPage + 1) * wifiPerPage) {
-          wifiPage++;
-        }
-      }
-      break;
-    case STATE_GAME_SELECT:
-      if (menuSelection < 3) {
-        menuSelection++;
-      }
-      break;
-    case STATE_API_SELECT:
-      if (menuSelection < 1) {
-        menuSelection++;
+      if (networkCount > 0) {
+        selectedNetwork = (selectedNetwork + 1) % networkCount;
+        wifiPage = selectedNetwork / wifiPerPage;
+        displayWiFiNetworks();
       }
       break;
     case STATE_KEYBOARD:
     case STATE_PASSWORD_INPUT:
-      cursorY++;
-      if (cursorY > 2) cursorY = 0; // Wrap to top
+      cursorY = (cursorY + 1) % 3;
+      drawKeyboard();
+      break;
+    case STATE_CALCULATOR:
+      cursorY = (cursorY + 1) % 4;
+      showCalculator();
       break;
     case STATE_CHAT_RESPONSE:
-      scrollOffset += 10;
-      break;
-    case STATE_GAME_PONG:
-       // Handled in handlePongInput
-      break;
-    case STATE_GAME_SIDE_SCROLLER:
-       // Handled in handleSideScrollerInput
+      scrollOffset += 8;
+      displayResponse();
       break;
   }
 }
 
 void handleLeft() {
   switch(currentState) {
+    case STATE_MAIN_MENU:
+      // Navigate icon menu kiri
+      selectedIconIndex = max(0, selectedIconIndex - 1);
+      showMainMenu();
+      break;
     case STATE_KEYBOARD:
     case STATE_PASSWORD_INPUT:
-      cursorX--;
-      if (cursorX < 0) cursorX = 9; // Wrap to right
+      cursorX = (cursorX - 1 + 10) % 10;
+      drawKeyboard();
       break;
-    case STATE_GAME_SPACE_INVADERS:
-      // Handled in handleSpaceInvadersInput
+    case STATE_CALCULATOR:
+      cursorX = (cursorX - 1 + 4) % 4;
+      showCalculator();
       break;
-    case STATE_GAME_SIDE_SCROLLER:
-      // Handled in handleSideScrollerInput
+    case STATE_DISPLAY_SETTINGS:
+      if (menuSelection == 0) {
+        fontSize = max(1, fontSize - 1);
+        preferences.putInt("fontSize", fontSize);
+        showDisplaySettings();
+      } else if (menuSelection == 1) {
+        animSpeed = max(50, animSpeed - 50);
+        preferences.putInt("animSpeed", animSpeed);
+        showDisplaySettings();
+      }
       break;
   }
 }
 
 void handleRight() {
   switch(currentState) {
+    case STATE_MAIN_MENU:
+      // Navigate icon menu kanan
+      selectedIconIndex = min(iconMenuCount - 1, selectedIconIndex + 1);
+      showMainMenu();
+      break;
     case STATE_KEYBOARD:
     case STATE_PASSWORD_INPUT:
-      cursorX++;
-      if (cursorX > 9) cursorX = 0; // Wrap to left
+      cursorX = (cursorX + 1) % 10;
+      drawKeyboard();
       break;
-    case STATE_GAME_SPACE_INVADERS:
-      // Handled in handleSpaceInvadersInput
+    case STATE_CALCULATOR:
+      cursorX = (cursorX + 1) % 4;
+      showCalculator();
       break;
-    case STATE_GAME_SIDE_SCROLLER:
-       // Handled in handleSideScrollerInput
+    case STATE_DISPLAY_SETTINGS:
+      if (menuSelection == 0) {
+        fontSize = min(2, fontSize + 1);
+        preferences.putInt("fontSize", fontSize);
+        showDisplaySettings();
+      } else if (menuSelection == 1) {
+        animSpeed = min(300, animSpeed + 50);
+        preferences.putInt("animSpeed", animSpeed);
+        showDisplaySettings();
+      }
       break;
   }
 }
@@ -2451,235 +3023,137 @@ void handleSelect() {
     case STATE_WIFI_MENU:
       handleWiFiMenuSelect();
       break;
+    case STATE_POWER_BASE:
+      handlePowerBaseSelect();
+      break;
+    case STATE_POWER_VISUAL:
+    case STATE_POWER_STATS:
+    case STATE_POWER_GRAPH:
+    case STATE_POWER_CONSUMPTION:
+      currentState = STATE_POWER_BASE;
+      powerMenuSelection = 0;
+      showPowerBase();
+      break;
+    case STATE_SETTINGS_MENU:
+      handleSettingsMenuSelect();
+      break;
+    case STATE_DISPLAY_SETTINGS:
+      if (menuSelection == 2) { // Save & Back
+        ledSuccess();
+        showStatus("Settings saved!", 1000);
+        currentState = STATE_SETTINGS_MENU;
+        settingsMenuSelection = 0;
+        showSettingsMenu();
+      }
+      break;
+    case STATE_SYSTEM_INFO:
+    case STATE_DEVELOPER_MODE:
+    case STATE_BATTERY_GUARDIAN:
+      currentState = STATE_SETTINGS_MENU;
+      settingsMenuSelection = 0;
+      showSettingsMenu();
+      break;
+    case STATE_API_SELECT:
+      handleAPISelectSelect();
+      break;
+    case STATE_CALCULATOR:
+      handleCalculatorInput();
+      break;
+    case STATE_ESP_NOW_MENU:
+      switch(menuSelection) {
+        case 0: // Send Message
+          if (peerCount > 0) {
+            currentState = STATE_KEYBOARD;
+            userInput = "";
+            outgoingMessage = "";
+            cursorX = 0;
+            cursorY = 0;
+            drawKeyboard();
+          } else {
+            showStatus("No peers!\nAdd via Serial", 2000);
+            showESPNowMenu();
+          }
+          break;
+        case 1: // Inbox
+          currentState = STATE_ESP_NOW_INBOX;
+          menuSelection = 0;
+          showESPNowInbox();
+          break;
+        case 2: // Manage Peers
+          currentState = STATE_ESP_NOW_PEERS;
+          showESPNowPeers();
+          break;
+        case 3: // Back
+          currentState = STATE_MAIN_MENU;
+          menuSelection = 0;
+          showMainMenu();
+          break;
+      }
+      break;
+    case STATE_ESP_NOW_SEND:
+      if (peerCount > 0) {
+        currentState = STATE_KEYBOARD;
+        userInput = "";
+        cursorX = 0;
+        cursorY = 0;
+        currentKeyboardMode = MODE_LOWER;
+        drawKeyboard();
+      }
+      break;
+    case STATE_ESP_NOW_INBOX:
+      if (inboxCount > 0) {
+        inbox[menuSelection].read = true;
+        showStatus(inbox[menuSelection].text, 3000);
+        showESPNowInbox();
+      }
+      break;
+    case STATE_ESP_NOW_PEERS:
+      currentState = STATE_ESP_NOW_MENU;
+      menuSelection = 0;
+      showESPNowMenu();
+      break;
     case STATE_WIFI_SCAN:
       if (networkCount > 0) {
         selectedSSID = networks[selectedNetwork].ssid;
         if (networks[selectedNetwork].encrypted) {
           passwordInput = "";
-          keyboardContext = CONTEXT_WIFI_PASSWORD;
+          currentState = STATE_PASSWORD_INPUT;
           cursorX = 0;
           cursorY = 0;
-          changeState(STATE_PASSWORD_INPUT);
+          currentKeyboardMode = MODE_LOWER;
+          drawKeyboard();
         } else {
           connectToWiFi(selectedSSID, "");
         }
       }
       break;
-    case STATE_GAME_SELECT:
-      handleGameSelectSelect();
-      break;
-    case STATE_API_SELECT:
-      handleAPISelectSelect();
-      break;
     case STATE_KEYBOARD:
-      handleKeyPress();
+      if (previousState == STATE_ESP_NOW_MENU || previousState == STATE_ESP_NOW_SEND) {
+        // ESP-NOW message mode
+        const char* key = getCurrentKey();
+        if (strcmp(key, "OK") == 0 && userInput.length() > 0) {
+          if (peerCount > 0) {
+            sendESPNowMessage(userInput, peerAddresses[selectedPeer]);
+            userInput = "";
+            currentState = STATE_ESP_NOW_MENU;
+            showESPNowMenu();
+          }
+        } else {
+          handleKeyPress();
+        }
+      } else {
+        handleKeyPress();
+      }
       break;
     case STATE_PASSWORD_INPUT:
       handlePasswordKeyPress();
       break;
-    case STATE_GAME_SPACE_INVADERS:
-      // Shoot
-      triggerNeoPixelEffect(pixels.Color(200, 200, 200), 50); // White flash
-      for (int i = 0; i < MAX_BULLETS; i++) {
-        if (!invaders.bullets[i].active) {
-          invaders.bullets[i].x = invaders.playerX + invaders.playerWidth / 2;
-          invaders.bullets[i].y = invaders.playerY;
-          invaders.bullets[i].active = true;
-          
-          // Double shot
-          if (invaders.weaponType >= 1 && i < MAX_BULLETS - 1) {
-            invaders.bullets[i+1].x = invaders.playerX + 2;
-            invaders.bullets[i+1].y = invaders.playerY;
-            invaders.bullets[i+1].active = true;
-            i++;
-          }
-          
-          // Triple shot
-          if (invaders.weaponType >= 2 && i < MAX_BULLETS - 1) {
-            invaders.bullets[i+1].x = invaders.playerX + invaders.playerWidth - 2;
-            invaders.bullets[i+1].y = invaders.playerY;
-            invaders.bullets[i+1].active = true;
-          }
-          break;
-        }
-      }
-      break;
-    case STATE_GAME_SIDE_SCROLLER:
-      // Shoot
-      for (int i = 0; i < MAX_SCROLLER_BULLETS; i++) {
-        if (!scroller.bullets[i].active) {
-          scroller.bullets[i].x = scroller.playerX + 4;
-          scroller.bullets[i].y = scroller.playerY;
-          scroller.bullets[i].dirX = 1;
-          scroller.bullets[i].dirY = 0;
-          scroller.bullets[i].damage = scroller.weaponLevel;
-          scroller.bullets[i].active = true;
-          
-          // Multi-shot based on weapon level
-          if (scroller.weaponLevel >= 2 && i < MAX_SCROLLER_BULLETS - 1) {
-            scroller.bullets[i+1].x = scroller.playerX + 4;
-            scroller.bullets[i+1].y = scroller.playerY;
-            scroller.bullets[i+1].dirX = 1;
-            scroller.bullets[i+1].dirY = -1;
-            scroller.bullets[i+1].damage = scroller.weaponLevel;
-            scroller.bullets[i+1].active = true;
-            i++;
-          }
-          
-          if (scroller.weaponLevel >= 3 && i < MAX_SCROLLER_BULLETS - 1) {
-            scroller.bullets[i+1].x = scroller.playerX + 4;
-            scroller.bullets[i+1].y = scroller.playerY;
-            scroller.bullets[i+1].dirX = 1;
-            scroller.bullets[i+1].dirY = 1;
-            scroller.bullets[i+1].damage = scroller.weaponLevel;
-            scroller.bullets[i+1].active = true;
-          }
-          break;
-        }
-      }
-      break;
-  }
-}
-
-void handleBackButton() {
-  switch(currentState) {
-    // WiFi Flow
-    case STATE_PASSWORD_INPUT:
-      changeState(STATE_WIFI_SCAN);
-      break;
-    case STATE_WIFI_SCAN:
-      changeState(STATE_WIFI_MENU);
-      break;
-    case STATE_WIFI_MENU:
-      changeState(STATE_MAIN_MENU);
-      break;
-
-    // Chat AI Flow
     case STATE_CHAT_RESPONSE:
-      changeState(STATE_KEYBOARD);
-      break;
-    case STATE_KEYBOARD:
-      if (keyboardContext == CONTEXT_CHAT) {
-        changeState(STATE_API_SELECT);
-      } else { // CONTEXT_WIFI_PASSWORD
-        changeState(STATE_WIFI_SCAN);
-      }
-      break;
-    case STATE_API_SELECT:
-      changeState(STATE_MAIN_MENU);
-      break;
-
-    // Game Flow
-    case STATE_GAME_SPACE_INVADERS:
-    case STATE_GAME_SIDE_SCROLLER:
-    case STATE_GAME_PONG:
-      changeState(STATE_GAME_SELECT);
-      break;
-    case STATE_GAME_SELECT:
-      changeState(STATE_MAIN_MENU);
-      break;
-
-    // Other simple cases
-    case STATE_VIDEO_PLAYER:
-      changeState(STATE_MAIN_MENU);
-      break;
-
-    default:
-      // Default back to main menu if we're lost
-      changeState(STATE_MAIN_MENU);
+      currentState = STATE_MAIN_MENU;
+      userInput = "";
+      aiResponse = "";
+      scrollOffset = 0;
+      showMainMenu();
       break;
   }
-}
-
-void displayResponse(int x_offset) {
-  display.clearDisplay();
-  drawBatteryIndicator();
-
-  display.setCursor(x_offset, 0);
-  display.setTextSize(1);
-
-  int y = 12 - scrollOffset;
-
-  display.setCursor(x_offset, y);
-  display.print(aiResponse);
-
-  if (aiResponse.length() > 100) {
-      int totalH = (aiResponse.length() / 21 + 1) * 8;
-      int visibleH = SCREEN_HEIGHT - 12;
-      if (totalH > visibleH) {
-         int scrollH = (visibleH * visibleH) / totalH;
-         int scrollY = 12 + (scrollOffset * visibleH) / totalH;
-         display.fillRect(SCREEN_WIDTH - 2, scrollY, 2, scrollH, SSD1306_WHITE);
-      }
-  }
-
-  display.display();
-}
-
-void sendToGemini() {
-  if (WiFi.status() != WL_CONNECTED) {
-    showStatus("No WiFi!", 2000);
-    return;
-  }
-
-  changeState(STATE_LOADING);
-  loadingFrame = 0;
-
-  WiFiClientSecure client;
-  client.setInsecure(); // Allow insecure connections
-
-  HTTPClient http;
-
-  String apiKey = (selectedAPIKey == 1) ? geminiApiKey1 : geminiApiKey2;
-  String url = String(geminiEndpoint) + "?key=" + apiKey;
-
-  // Manually create the JSON payload
-  String escapedInput = userInput;
-  escapedInput.replace("\\", "\\\\");
-  escapedInput.replace("\"", "\\\"");
-  escapedInput.replace("\n", "\\n");
-
-  String jsonPayload = "{\"contents\":[{\"parts\":[{\"text\":\"" + escapedInput + "\"}]}],";
-  jsonPayload += "\"generationConfig\": {\"maxOutputTokens\": 150}}";
-
-
-  Serial.println("Sending to Gemini...");
-  Serial.println(jsonPayload);
-
-
-  http.begin(client, url);
-  http.addHeader("Content-Type", "application/json");
-  http.setTimeout(15000); // 15-second timeout
-
-  int httpResponseCode = http.POST(jsonPayload);
-
-  if (httpResponseCode == 200) {
-    String response = http.getString();
-    Serial.println("Response received");
-
-    JsonDocument responseDoc;
-    DeserializationError error = deserializeJson(responseDoc, response);
-
-    if (!error && responseDoc.containsKey("candidates")) {
-      const char* text = responseDoc["candidates"][0]["content"]["parts"][0]["text"];
-      if (text) {
-        aiResponse = String(text);
-      } else {
-        aiResponse = "Error: Empty response text.";
-      }
-    } else {
-      aiResponse = "Error: JSON Parsing failed.";
-      Serial.println(error.c_str());
-      Serial.println(response);
-    }
-  } else {
-    String response = http.getString();
-    aiResponse = "Error: HTTP " + String(httpResponseCode) + "\n" + response;
-    Serial.println(aiResponse);
-  }
-
-  http.end();
-
-  scrollOffset = 0;
-  changeState(STATE_CHAT_RESPONSE);
 }
