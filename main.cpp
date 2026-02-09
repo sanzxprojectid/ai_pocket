@@ -554,9 +554,11 @@ void calculateTriviaScore(unsigned long timeElapsed) {
 }
 
 void playSoundEffect(int trackNum) {
-  if (musicPlayerAvailable && totalTracks >= trackNum) {
-    dfPlayer.play(trackNum);
-    delay(100);
+  if (musicPlayerAvailable) {
+    // Use playFolder(1, trackNum) to isolate SFX from music files.
+    // Create folder "01" on SD card: 001.mp3 (Correct), 002.mp3 (Wrong)
+    dfPlayer.playFolder(1, trackNum);
+    delay(50);
   }
 }
 
@@ -743,97 +745,98 @@ void drawTriviaMode() {
 
 void drawTriviaPlaying() {
   display.clearDisplay();
-  drawStatusBar();
   
-  // Timer bar
+  // 1. Header (0-7)
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.print("Q:"); display.print(triviaCurrentQuestion + 1);
+  display.print("/"); display.print(triviaTotalQuestions);
+  display.setCursor(50, 0);
+  display.print("Sc:"); display.print(triviaScore);
+  if (triviaStreak >= 3) {
+    display.setCursor(105, 0);
+    display.print("x"); display.print(triviaStreak);
+  }
+
+  // 2. Timer Bar (8-10)
   unsigned long timeElapsed = millis() - triviaQuestionStartTime;
-  unsigned long timeRemaining = triviaTimeLimit - timeElapsed;
+  unsigned long timeRemaining = (timeElapsed >= triviaTimeLimit) ? 0 : (triviaTimeLimit - timeElapsed);
   
-  if (timeRemaining <= 0 && !triviaAnswered) {
+  if (timeRemaining == 0 && !triviaAnswered) {
     triviaAnswered = true;
     triviaWrongAnswers++;
     triviaStreak = 0;
     triviaCurrentQuestion++;
-    playSoundEffect(2); // Wrong sound
+    playSoundEffect(2);
     delay(1000);
     changeState(STATE_TRIVIA_RESULT);
     return;
   }
   
-  int timerBarWidth = map(timeRemaining, 0, triviaTimeLimit, 0, SCREEN_WIDTH);
-  display.fillRect(0, 10, timerBarWidth, 3, SSD1306_WHITE);
+  int timerW = map(timeRemaining, 0, triviaTimeLimit, 0, SCREEN_WIDTH);
+  display.drawRect(0, 8, SCREEN_WIDTH, 3, SSD1306_WHITE);
+  display.fillRect(0, 8, timerW, 3, SSD1306_WHITE);
   
-  // Question number and score
-  display.setTextSize(1);
-  display.setCursor(0, 14);
-  display.print("Q");
-  display.print(triviaCurrentQuestion + 1);
-  display.print("/");
-  display.print(triviaTotalQuestions);
-  
-  display.setCursor(50, 14);
-  display.print("Score:");
-  display.print(triviaScore);
-  
-  // Streak indicator
-  if (triviaStreak >= 3) {
-    display.setCursor(SCREEN_WIDTH - 20, 14);
-    display.print("x");
-    display.print(triviaStreak);
-  }
-  
-  // Question text (scrolling if too long)
-  display.setCursor(2, 24);
+  // 3. Question with Auto-Scroll (12-27)
   String question = currentQuestion.question;
-  if (question.length() > 42) {
-    question = question.substring(0, 42) + "...";
-  }
-  
-  // Word wrap question
-  int y = 24;
-  String word = "";
-  int x = 2;
-  for (unsigned int i = 0; i < question.length(); i++) {
-    char c = question.charAt(i);
-    if (c == ' ' || i == question.length() - 1) {
-      if (i == question.length() - 1 && c != ' ') word += c;
-      int wordWidth = word.length() * 6;
-      if (x + wordWidth > SCREEN_WIDTH - 2) {
-        y += 8;
-        x = 2;
+  static String lastQuestion = "";
+  static String lines[6];
+  static int lineCount = 0;
+
+  if (question != lastQuestion) {
+    lastQuestion = question;
+    lineCount = 0;
+    String word = "";
+    String currentLine = "";
+    for (unsigned int i = 0; i <= question.length(); i++) {
+      char c = (i < question.length()) ? question[i] : ' ';
+      if (c == ' ') {
+        if ((currentLine.length() + word.length()) * 6 > SCREEN_WIDTH - 2) {
+          if (lineCount < 6) lines[lineCount++] = currentLine;
+          currentLine = word + " ";
+        } else {
+          currentLine += word + " ";
+        }
+        word = "";
+      } else {
+        word += c;
       }
-      if (y < 38) {
-        display.setCursor(x, y);
-        display.print(word);
-      }
-      x += wordWidth + 6;
-      word = "";
-    } else {
-      word += c;
     }
+    if (currentLine.length() > 0 && lineCount < 6) lines[lineCount++] = currentLine;
   }
-  
-  // Answer options
-  int answerY = 40;
-  int answerHeight = 6;
-  
+
+  int scrollIdx = 0;
+  if (lineCount > 2) {
+    scrollIdx = (millis() / 2000) % lineCount;
+    // Keep it from jumping too much, show 2 lines
+    if (scrollIdx > lineCount - 2) scrollIdx = lineCount - 2;
+  }
+
+  for (int i = 0; i < 2 && (scrollIdx + i) < lineCount; i++) {
+    display.setCursor(0, 12 + (i * 8));
+    display.print(lines[scrollIdx + i]);
+  }
+
+  // 4. Answers - All 4 visible (28-63)
+  int answerStartY = 28;
+  int answerHeight = 9;
   for (int i = 0; i < currentQuestion.answerCount && i < 4; i++) {
-    int ay = answerY + (i * answerHeight);
-    
+    int ay = answerStartY + (i * answerHeight);
     if (i == triviaSelectedAnswer) {
-      display.fillRect(0, ay, SCREEN_WIDTH, answerHeight, SSD1306_WHITE);
+      display.fillRect(0, ay, SCREEN_WIDTH, answerHeight - 1, SSD1306_WHITE);
       display.setTextColor(SSD1306_BLACK);
     } else {
-      display.drawRect(0, ay, SCREEN_WIDTH, answerHeight, SSD1306_WHITE);
       display.setTextColor(SSD1306_WHITE);
     }
     
     display.setCursor(2, ay + 1);
-    String answer = currentQuestion.answers[i];
-    if (answer.length() > 20) answer = answer.substring(0, 20);
-    display.print(answer);
-    
-    display.setTextColor(SSD1306_WHITE);
+    display.print(i == 0 ? "A:" : i == 1 ? "B:" : i == 2 ? "C:" : "D:");
+
+    String ans = currentQuestion.answers[i];
+    if (ans.length() > 17) ans = ans.substring(0, 17);
+    display.setCursor(18, ay + 1);
+    display.print(ans);
   }
   
   display.display();
@@ -2525,7 +2528,11 @@ void loop() {
   }
   
   if (currentState == STATE_TRIVIA_PLAYING) {
-    refreshCurrentScreen();
+    static unsigned long lastTriviaUpdate = 0;
+    if (millis() - lastTriviaUpdate > 150) {
+      lastTriviaUpdate = millis();
+      refreshCurrentScreen();
+    }
   }
   
   if (currentMillis - lastDebounce > debounceDelay) {
@@ -2825,6 +2832,11 @@ void loop() {
           changeState(STATE_TRIVIA_MODE);
           break;
         case STATE_TRIVIA_MODE:
+          // Stop any background music before starting quiz
+          if (musicPlayerAvailable) {
+            dfPlayer.stop();
+            isPlaying = false;
+          }
           // Initialize game
           triviaCurrentQuestion = 0;
           triviaTotalQuestions = triviaModeQuestions[selectedTriviaMode];
