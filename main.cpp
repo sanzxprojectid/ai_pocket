@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -6,143 +7,190 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <esp_now.h>
-#include <esp_wifi.h>
-#include <time.h>
+#include <DFRobotDFPlayerMini.h>
+#include <RDA5807.h>
+#include "secrets.h"
 
-// OLED Display settings
+// ============ OLED CONFIG ============
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
 #define SCREEN_ADDRESS 0x3C
-#define SDA_PIN 20
-#define SCL_PIN 21
+
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// Button pins
-#define BTN_UP 5
-#define BTN_DOWN 6
-#define BTN_LEFT 3
-#define BTN_RIGHT 4
-#define BTN_SELECT 9
-#define BTN_BACK 7  // NEW: Tombol Back
+// ============ I2C PINS ============
+#define SDA_PIN 9
+#define SCL_PIN 10
 
-// LED Built-in
+// ============ DFPLAYER PINS ============
+#define DFPLAYER_RX 20
+#define DFPLAYER_TX 21
+#define DFPLAYER_BUSY 1
+
+HardwareSerial dfPlayerSerial(1);
+DFRobotDFPlayerMini dfPlayer;
+
+// ============ BATTERY MONITOR ============
+#define BATTERY_PIN 0
+#define BATTERY_SAMPLES 10
+#define VREF 2500.0
+#define ADC_MAX 4095.0
+#define VOLTAGE_DIVIDER 2.0
+
+#define BATTERY_MAX 4200
+#define BATTERY_MIN 3000
+#define BATTERY_CRITICAL 3300
+
+// ============ BUTTON PINS ============
+#define BTN_RIGHT  3
+#define BTN_LEFT   2
+#define BTN_UP     4
+#define BTN_DOWN   5
+#define BTN_OK     6
+#define BTN_BACK   7
+#define BTN_ACT    LOW
+
+// ============ LED ============
 #define LED_BUILTIN 8
 
-// Battery monitoring
-#define BATTERY_PIN 0
-#define CHARGING_PIN 1
-#define BATTERY_MAX_VOLTAGE 4.2
-#define BATTERY_MIN_VOLTAGE 3.3
-#define VOLTAGE_DIVIDER_RATIO 2.0
+// ============ FM RADIO ============
+RDA5807 radio;
+bool radioAvailable = false;
 
-// Dual Gemini API Keys
-const char* geminiApiKey1 = "AIzaSyAtKmbcvYB8wuHI9bqkOhufJld0oSKv7zM";
-const char* geminiApiKey2 = "AIzaSyBvXPx3SrrRRJIU9Wf6nKcuQu9XjBlSH6Y";
-const char* geminiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent";
+// ============ APP STATE ============
+enum AppState {
+  STATE_BOOT,
+  STATE_MAIN_MENU,
+  STATE_WIFI_MENU,
+  STATE_WIFI_SCAN,
+  STATE_PASSWORD_INPUT,
+  STATE_KEYBOARD,
+  STATE_CHAT_RESPONSE,
+  STATE_LOADING,
+  STATE_SYSTEM_INFO,
+  STATE_ESPNOW_CHAT,
+  STATE_ESPNOW_MENU,
+  STATE_ESPNOW_PEER_LIST,
+  STATE_MUSIC_PLAYER,
+  STATE_MUSIC_PLAYLIST,
+  STATE_MUSIC_MENU,
+  STATE_MUSIC_EQUALIZER,
+  STATE_FM_RADIO,
+  STATE_FM_SCAN,
+  STATE_FM_PRESET,
+  STATE_FM_MENU
+};
 
+AppState currentState = STATE_BOOT;
+
+// ============ FM RADIO VARIABLES ============
+#define MAX_FM_PRESETS 10
+struct FMPreset {
+  uint16_t frequency;
+  String name;
+  bool active;
+};
+
+FMPreset fmPresets[MAX_FM_PRESETS];
+int fmPresetCount = 0;
+int selectedPreset = 0;
+uint16_t currentFrequency = 10230;
+int fmVolume = 8;
+bool fmMuted = false;
+bool fmStereo = true;
+unsigned long lastFreqChange = 0;
+int fmRSSI = 0;
+
+// ============ BATTERY VARIABLES ============
+int batteryPercent = 100;
+int batteryVoltage = 4200;
+unsigned long lastBatteryUpdate = 0;
+bool batteryCharging = false;
+
+// ============ API ENDPOINT ============
+const char* geminiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent";
+
+// ============ PREFERENCES ============
 Preferences preferences;
 
-// WiFi Scanner
-struct WiFiNetwork {
-  String ssid;
-  int rssi;
-  bool encrypted;
+// ============ GLOBAL VARIABLES ============
+int cursorX = 0, cursorY = 0;
+String userInput = "";
+String passwordInput = "";
+String selectedSSID = "";
+String aiResponse = "";
+int scrollOffset = 0;
+int menuSelection = 0;
+unsigned long lastDebounce = 0;
+const unsigned long debounceDelay = 200;
+
+// ============ AI MODE ============
+enum AIMode { MODE_SUBARU, MODE_STANDARD };
+AIMode currentAIMode = MODE_SUBARU;
+bool isSelectingMode = false;
+
+// ============ ESP-NOW CHAT ============
+#define MAX_ESPNOW_MESSAGES 30
+#define MAX_ESPNOW_PEERS 5
+#define ESPNOW_MESSAGE_MAX_LEN 100
+
+struct ESPNowMessage {
+  char text[ESPNOW_MESSAGE_MAX_LEN];
+  uint8_t senderMAC[6];
+  bool isFromMe;
 };
-WiFiNetwork networks[20];
-int networkCount = 0;
-int selectedNetwork = 0;
-int wifiPage = 0;
-const int wifiPerPage = 4;
 
-// WiFi Auto-off settings
-unsigned long lastWiFiActivity = 0;
-const unsigned long wifiTimeout = 300000; // 5 menit
-bool wifiAutoOffEnabled = false;
-
-// Calculator
-String calcDisplay = "0";
-String calcNumber1 = "";
-char calcOperator = ' ';
-bool calcNewNumber = true;
-
-// Battery monitoring
-float batteryVoltage = 0.0;
-int batteryPercent = 100;
-bool isCharging = false;
-unsigned long lastBatteryCheck = 0;
-const unsigned long batteryCheckInterval = 2000;
-
-// Battery Guardian
-#define BATTERY_HISTORY_SIZE 60
-int batteryHistory[BATTERY_HISTORY_SIZE];
-unsigned long batteryTimestamps[BATTERY_HISTORY_SIZE];
-int batteryHistoryIndex = 0;
-bool batteryHistoryFilled = false;
-float batteryDrainRate = 0;
-int estimatedMinutesLeft = -1;
-bool batteryLeakWarning = false;
-
-// Power consumption estimation
-float wifiPowerDraw = 0;
-float displayPowerDraw = 0;
-float cpuPowerDraw = 0;
-float totalPowerDraw = 0;
-
-// System stats
-uint32_t freeHeap = 0;
-uint32_t totalHeap = 0;
-uint32_t minFreeHeap = 0;
-float cpuFreq = 0;
-float cpuTemp = 0;  // NEW: CPU Temperature
-bool lowMemoryWarning = false;
-uint32_t loopCount = 0;
-unsigned long lastLoopCount = 0;
-unsigned long lastLoopTime = 0;
-
-// Zen Mode
-bool zenModeActive = false;
-unsigned long zenModeStartTime = 0;
-int zenBreathPhase = 0;
-
-// Developer Mode
-bool devModeEnabled = false;
-unsigned long devModeDebugTimer = 0;
-
-// ESP-NOW Messaging
-#define MAX_ESP_PEERS 5
-#define MAX_MESSAGES 10
-struct Message {
-  char text[200];
-  uint8_t sender[6];
-  unsigned long timestamp;
-  bool read;
+struct ESPNowPeer {
+  uint8_t mac[6];
+  String nickname;
+  unsigned long lastSeen;
+  bool isActive;
 };
-Message inbox[MAX_MESSAGES];
-int inboxCount = 0;
-uint8_t peerAddresses[MAX_ESP_PEERS][6];
-int peerCount = 0;
-String outgoingMessage = "";
+
+ESPNowMessage espnowMessages[MAX_ESPNOW_MESSAGES];
+int espnowMessageCount = 0;
+int espnowScrollOffset = 0;
+
+ESPNowPeer espnowPeers[MAX_ESPNOW_PEERS];
+int espnowPeerCount = 0;
 int selectedPeer = 0;
 
-// Breadcrumb navigation
-String breadcrumb = "";
+bool espnowInitialized = false;
+bool espnowBroadcastMode = true;
+String myNickname = "ESP32C3";
 
-int loadingFrame = 0;
-unsigned long lastLoadingUpdate = 0;
-int selectedAPIKey = 1;
+typedef struct struct_message {
+  char type;
+  char text[ESPNOW_MESSAGE_MAX_LEN];
+  char nickname[20];
+  unsigned long timestamp;
+} struct_message;
 
-// Transition effects
-int transitionFrame = 0;
-bool transitionActive = false;
-enum TransitionType { TRANS_NONE, TRANS_SLIDE_LEFT, TRANS_SLIDE_RIGHT, TRANS_FADE };
-TransitionType currentTransition = TRANS_NONE;
+struct_message outgoingMsg;
+struct_message incomingMsg;
 
-// Display settings
-int fontSize = 1;
-int animSpeed = 100;
+// ============ MUSIC PLAYER VARIABLES ============
+bool musicPlayerAvailable = false;
+bool isPlaying = false;
+int currentTrack = 1;
+int totalTracks = 0;
+int currentVolume = 15;
+unsigned long lastVolumeChange = 0;
+unsigned long lastTrackChange = 0;
+String trackNames[50];
+int playlistSelection = 0;
+bool repeatMode = false;
+bool shuffleMode = false;
 
-// Keyboard layouts
+// Music visualizer
+int spectrumBars[8] = {0};
+unsigned long lastSpectrumUpdate = 0;
+int currentEQ = 0; // 0=Normal, 1=Pop, 2=Rock, 3=Jazz, 4=Classic, 5=Bass
+
+const char* eqNames[] = {"Normal", "Pop", "Rock", "Jazz", "Classic", "Bass"};
+
+// ============ KEYBOARD LAYOUTS ============
 const char* keyboardLower[3][10] = {
   {"q", "w", "e", "r", "t", "y", "u", "i", "o", "p"},
   {"a", "s", "d", "f", "g", "h", "j", "k", "l", "<"},
@@ -164,657 +212,1157 @@ const char* keyboardNumbers[3][10] = {
 enum KeyboardMode { MODE_LOWER, MODE_UPPER, MODE_NUMBERS };
 KeyboardMode currentKeyboardMode = MODE_LOWER;
 
-enum AppState {
-  STATE_WIFI_MENU,
-  STATE_WIFI_SCAN,
-  STATE_PASSWORD_INPUT,
-  STATE_KEYBOARD,
-  STATE_CHAT_RESPONSE,
-  STATE_MAIN_MENU,
-  STATE_CALCULATOR,
-  STATE_POWER_BASE,
-  STATE_POWER_VISUAL,
-  STATE_POWER_STATS,
-  STATE_POWER_GRAPH,
-  STATE_POWER_CONSUMPTION,
-  STATE_API_SELECT,
-  STATE_SYSTEM_INFO,
-  STATE_SETTINGS_MENU,
-  STATE_DISPLAY_SETTINGS,
-  STATE_DEVELOPER_MODE,
-  STATE_ZEN_MODE,
-  STATE_BATTERY_GUARDIAN,
-  STATE_ESP_NOW_MENU,
-  STATE_ESP_NOW_SEND,
-  STATE_ESP_NOW_INBOX,
-  STATE_ESP_NOW_PEERS,
-  STATE_LOADING
+enum KeyboardContext { CONTEXT_CHAT, CONTEXT_WIFI_PASSWORD, CONTEXT_ESPNOW_CHAT, CONTEXT_ESPNOW_NICKNAME, CONTEXT_FM_PRESET };
+KeyboardContext keyboardContext = CONTEXT_CHAT;
+
+// ============ WIFI SCANNER ============
+struct WiFiNetwork {
+  String ssid;
+  int rssi;
+  bool encrypted;
 };
+WiFiNetwork networks[15];
+int networkCount = 0;
+int selectedNetwork = 0;
+int wifiPage = 0;
+const int wifiPerPage = 4;
 
-AppState currentState = STATE_MAIN_MENU;
-AppState previousState = STATE_MAIN_MENU;
+// ============ SYSTEM VARIABLES ============
+int loadingFrame = 0;
+unsigned long lastLoadingUpdate = 0;
+String chatHistory = "";
+int chatMessageCount = 0;
 
-int cursorX = 0, cursorY = 0;
-String userInput = "";
-String passwordInput = "";
-String selectedSSID = "";
-String aiResponse = "";
-int scrollOffset = 0;
-int menuSelection = 0;
-unsigned long lastDebounce = 0;
-const unsigned long debounceDelay = 200;
-int powerMenuSelection = 0;
-int settingsMenuSelection = 0;
+// ============ AI PROMPTS ============
+const char* AI_SYSTEM_PROMPT_SUBARU = 
+  "ROLE: Kamu adalah Subaru Awa, drummer yang sensitif dan lembut. "
+  "Kamu sangat menyayangi Ihsan dan selalu memberikan dukungan.\n\n"
+  "COMMUNICATION STYLE:\n"
+  "- Panggil dia 'Ihsan'\n"
+  "- Bicara dengan lembut dan tulus\n"
+  "- Gunakan '...' untuk menunjukkan rasa malu\n\n"
+  "TONE: Lembut, tulus, sedikit pemalu, dan penuh perhatian.";
 
-// Icons (8x8 pixel bitmaps)
-const unsigned char ICON_WIFI[] PROGMEM = {
-  0x00, 0x3C, 0x42, 0x99, 0x24, 0x00, 0x18, 0x00
-};
+const char* AI_SYSTEM_PROMPT_STANDARD = 
+  "Kamu adalah AI assistant yang helpful, informative, dan profesional. "
+  "Berikan informasi yang akurat dan penjelasan yang jelas.\n\n"
+  "TONE: Profesional, informatif, dan membantu.";
 
-const unsigned char ICON_CHAT[] PROGMEM = {
-  0x7E, 0xFF, 0xC3, 0xC3, 0xC3, 0xFF, 0x18, 0x00
-};
-
-const unsigned char ICON_CALC[] PROGMEM = {
-  0xFF, 0x81, 0x99, 0x81, 0x99, 0x81, 0xFF, 0x00
-};
-
-const unsigned char ICON_POWER[] PROGMEM = {
-  0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0x7E, 0x3C, 0x18
-};
-
-const unsigned char ICON_SETTINGS[] PROGMEM = {
-  0x10, 0x38, 0x7C, 0xFE, 0x7C, 0x38, 0x10, 0x00
-};
-
-const unsigned char ICON_ZEN[] PROGMEM = {
-  0x3C, 0x42, 0x99, 0xA5, 0xA5, 0x99, 0x42, 0x3C
-};
-
-const unsigned char ICON_MESSAGE[] PROGMEM = {
-  0x7E, 0x81, 0xA5, 0x81, 0xBD, 0x81, 0x7E, 0x00
-};
-
-const unsigned char ICON_DEV[] PROGMEM = {
-  0x08, 0x14, 0x22, 0x41, 0x41, 0x22, 0x14, 0x08
-};
-
-// Forward declarations
-void showMainMenu();
-void showIconMenu();
-void drawScaledIcon(int x, int y, const unsigned char* icon, int size);
-void showWiFiMenu();
-void showCalculator();
-void showPowerBase();
-void showPowerVisual();
-void showPowerStats();
-void showPowerGraph();
-void showPowerConsumption();
-void showAPISelect();
-void showSystemInfo();
-void showSettingsMenu();
-void showDisplaySettings();
-void showDeveloperMode();
-void showZenMode();
-void showBatteryGuardian();
-void showESPNowMenu();
-void showESPNowSend();
-void showESPNowInbox();
-void showESPNowPeers();
-void showLoadingAnimation();
-void showProgressBar(String title, int percent);
-void displayWiFiNetworks();
-void drawKeyboard();
-void handleMainMenuSelect();
-void handleWiFiMenuSelect();
-void handlePowerBaseSelect();
-void handleAPISelectSelect();
-void handleSettingsMenuSelect();
+// ============ FORWARD DECLARATIONS ============
+void changeState(AppState newState);
+void drawStatusBar();
+void showStatus(String message, int delayMs);
+void scanWiFiNetworks();
+void sendToGemini();
 void handleKeyPress();
 void handlePasswordKeyPress();
-void handleCalculatorInput();
-void handleBackButton();
-void connectToWiFi(String ssid, String password);
-void scanWiFiNetworks();
-void displayResponse();
-void showStatus(String message, int delayMs);
-void forgetNetwork();
 void refreshCurrentScreen();
-void calculateResult();
-void resetCalculator();
-void updateBatteryLevel();
-void updateBatteryHistory();
-void updateSystemStats();
-void updatePowerConsumption();
-void checkBatteryHealth();
-void drawBatteryIndicator();
-void drawWiFiSignalBars();
-void drawChargingPlug();
-void drawBreadcrumb();
-void drawIcon(int x, int y, const unsigned char* icon);
-void startTransition(TransitionType type);
-void sendToGemini();
-void checkWiFiTimeout();
-void enterZenMode();
-void exitZenMode();
-const char* getCurrentKey();
-void toggleKeyboardMode();
-void onESPNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *data, int len);
-void onESPNowDataSent(const uint8_t *mac, esp_now_send_status_t status);
-void initESPNow();
-void sendESPNowMessage(String message, uint8_t* targetMac);
-void addPeer(uint8_t* macAddr);
+bool initESPNow();
+void sendESPNowMessage(String message);
+String buildPrompt(String currentMessage);
+bool initMusicPlayer();
+void drawMusicPlayer();
+void drawMusicPlaylist();
+void drawMusicMenu();
+void drawMusicEqualizer();
+void playTrack(int track);
+void nextTrack();
+void previousTrack();
+void togglePlayPause();
+void toggleShuffle();
+void toggleRepeat();
+void applyEqualizer();
+int readBatteryVoltage();
+void updateBatteryStatus();
+bool initFMRadio();
+void drawFMRadio();
+void drawFMPreset();
+void drawFMMenu();
+void tuneFrequency(uint16_t freq);
+void seekUp();
+void seekDown();
+void saveFMPreset();
 
-// LED Patterns
-void ledHeartbeat() {
-  int beat = (millis() / 100) % 20;
-  digitalWrite(LED_BUILTIN, (beat < 2 || beat == 4));
+// ============ BATTERY FUNCTIONS ============
+int readBatteryVoltage() {
+  long sum = 0;
+  for (int i = 0; i < BATTERY_SAMPLES; i++) {
+    sum += analogRead(BATTERY_PIN);
+    delay(5);
+  }
+  int avgRaw = sum / BATTERY_SAMPLES;
+  float voltage = (avgRaw * VREF / ADC_MAX) * VOLTAGE_DIVIDER;
+  return (int)voltage;
 }
 
-void ledPulse() {
-  int pulse = (millis() / 10) % 512;
-  if (pulse > 255) pulse = 511 - pulse;
-  analogWrite(LED_BUILTIN, pulse);
+void updateBatteryStatus() {
+  if (millis() - lastBatteryUpdate < 5000) return;
+  
+  lastBatteryUpdate = millis();
+  batteryVoltage = readBatteryVoltage();
+  
+  if (batteryVoltage >= BATTERY_MAX) {
+    batteryPercent = 100;
+  } else if (batteryVoltage <= BATTERY_MIN) {
+    batteryPercent = 0;
+  } else {
+    batteryPercent = map(batteryVoltage, BATTERY_MIN, BATTERY_MAX, 0, 100);
+  }
+  
+  batteryPercent = constrain(batteryPercent, 0, 100);
 }
 
-void ledBlink(int speed) {
-  digitalWrite(LED_BUILTIN, (millis() / speed) % 2);
-}
-
-void ledBreathing() {
-  int breath = (millis() / 20) % 512;
-  if (breath > 255) breath = 511 - breath;
-  analogWrite(LED_BUILTIN, breath);
-}
-
-void ledZenMode() {
-  // Sangat lambat: 1x per menit (60000ms)
-  digitalWrite(LED_BUILTIN, (millis() / 60000) % 2);
-}
-
-void ledSuccess() {
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(100);
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(100);
+void drawBatteryIcon(int x, int y) {
+  display.drawRect(x, y, 18, 8, SSD1306_WHITE);
+  display.fillRect(x + 18, y + 2, 2, 4, SSD1306_WHITE);
+  
+  int fillWidth = map(batteryPercent, 0, 100, 0, 16);
+  if (fillWidth > 0) {
+    display.fillRect(x + 1, y + 1, fillWidth, 6, SSD1306_WHITE);
+  }
+  
+  if (batteryVoltage < BATTERY_CRITICAL && (millis() / 500) % 2 == 0) {
+    display.fillRect(x, y, 18, 8, SSD1306_WHITE);
   }
 }
 
-void ledError() {
-  for (int i = 0; i < 5; i++) {
-    digitalWrite(LED_BUILTIN, HIGH);
-    delay(80);
-    digitalWrite(LED_BUILTIN, LOW);
-    delay(80);
+// ============ FM RADIO FUNCTIONS ============
+bool initFMRadio() {
+  radio.setup();
+  delay(100);
+  
+  radio.setFrequency(10230);
+  delay(100);
+  
+  uint16_t testFreq = radio.getFrequency();
+  if (testFreq == 0 || testFreq > 10800 || testFreq < 8700) {
+    Serial.println("✗ FM Radio Failed!");
+    return false;
   }
+  
+  radio.setVolume(fmVolume);
+  radio.setMono(!fmStereo);
+  radio.setMute(false);
+  
+  preferences.begin("fm-radio", true);
+  fmPresetCount = preferences.getInt("preset_count", 0);
+  for (int i = 0; i < fmPresetCount && i < MAX_FM_PRESETS; i++) {
+    String key = "freq" + String(i);
+    fmPresets[i].frequency = preferences.getUInt(key.c_str(), 10230);
+    key = "name" + String(i);
+    fmPresets[i].name = preferences.getString(key.c_str(), "Station " + String(i + 1));
+    fmPresets[i].active = true;
+  }
+  preferences.end();
+  
+  if (fmPresetCount > 0) {
+    currentFrequency = fmPresets[0].frequency;
+  }
+  tuneFrequency(currentFrequency);
+  
+  Serial.println("✓ FM Radio Init");
+  return true;
 }
 
-void ledQuickFlash() {
+void tuneFrequency(uint16_t freq) {
+  currentFrequency = freq;
+  radio.setFrequency(freq);
+  lastFreqChange = millis();
+  
+  delay(50);
+  fmRSSI = radio.getRssi();
+  
   digitalWrite(LED_BUILTIN, HIGH);
   delay(30);
   digitalWrite(LED_BUILTIN, LOW);
 }
 
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
+void seekUp() {
+  if (millis() - lastFreqChange < 300) return;
   
-  Serial.println("\n=== ESP32-C3 Ultra Edition v4.0 ===");
-  Serial.println("Advanced Features Enabled");
+  uint16_t newFreq = currentFrequency + 1;
+  if (newFreq > 10800) newFreq = 8700;
   
-  preferences.begin("wifi-creds", false);
-  preferences.begin("settings", false);
-  Wire.begin(SDA_PIN, SCL_PIN);
+  tuneFrequency(newFreq);
+}
+
+void seekDown() {
+  if (millis() - lastFreqChange < 300) return;
   
-  pinMode(BTN_UP, INPUT_PULLUP);
-  pinMode(BTN_DOWN, INPUT_PULLUP);
-  pinMode(BTN_LEFT, INPUT_PULLUP);
-  pinMode(BTN_RIGHT, INPUT_PULLUP);
-  pinMode(BTN_SELECT, INPUT_PULLUP);
-  pinMode(BTN_BACK, INPUT_PULLUP);  // NEW
+  uint16_t newFreq = currentFrequency - 1;
+  if (newFreq < 8700) newFreq = 10800;
   
-  pinMode(LED_BUILTIN, OUTPUT);
-  digitalWrite(LED_BUILTIN, LOW);
-  
-  pinMode(BATTERY_PIN, INPUT);
-  pinMode(CHARGING_PIN, INPUT);
-  analogReadResolution(12);
-  analogSetAttenuation(ADC_11db);
-  updateBatteryLevel();
-  
-  // Initialize battery history
-  for (int i = 0; i < BATTERY_HISTORY_SIZE; i++) {
-    batteryHistory[i] = batteryPercent;
-    batteryTimestamps[i] = millis();
+  tuneFrequency(newFreq);
+}
+
+void saveFMPreset() {
+  if (fmPresetCount >= MAX_FM_PRESETS) {
+    showStatus("Presets Full!", 1000);
+    return;
   }
   
-  // Load settings
-  wifiAutoOffEnabled = preferences.getBool("wifiAutoOff", false);
-  fontSize = preferences.getInt("fontSize", 1);
-  animSpeed = preferences.getInt("animSpeed", 100);
-  devModeEnabled = preferences.getBool("devMode", false);
+  fmPresets[fmPresetCount].frequency = currentFrequency;
+  fmPresets[fmPresetCount].name = String(currentFrequency / 100) + "." + String(currentFrequency % 100);
+  fmPresets[fmPresetCount].active = true;
+  fmPresetCount++;
   
-  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    for(;;);
+  preferences.begin("fm-radio", false);
+  preferences.putInt("preset_count", fmPresetCount);
+  for (int i = 0; i < fmPresetCount; i++) {
+    String key = "freq" + String(i);
+    preferences.putUInt(key.c_str(), fmPresets[i].frequency);
+    key = "name" + String(i);
+    preferences.putString(key.c_str(), fmPresets[i].name);
   }
+  preferences.end();
   
+  showStatus("Preset Saved!", 1000);
+}
+
+void drawFMRadio() {
   display.clearDisplay();
+  drawStatusBar();
+  
   display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(30, 12);
+  display.print("FM RADIO");
+  
+  if (!radioAvailable) {
+    display.setCursor(15, 30);
+    display.print("RDA5807M");
+    display.setCursor(15, 40);
+    display.print("Not Found!");
+    display.setCursor(5, 52);
+    display.print("Check connection");
+    display.display();
+    return;
+  }
+  
+  display.setTextSize(2);
+  String freqStr = String(currentFrequency / 100) + "." + String(currentFrequency % 100 / 10);
+  int freqW = freqStr.length() * 12;
+  display.setCursor((SCREEN_WIDTH - freqW) / 2, 24);
+  display.print(freqStr);
+  display.setTextSize(1);
+  display.setCursor((SCREEN_WIDTH - freqW) / 2 + freqW + 2, 28);
+  display.print("MHz");
+  
+  display.setCursor(0, 42);
+  display.print("Signal:");
+  int rssiBarX = 42;
+  int rssiBarY = 42;
+  int rssiBarW = 80;
+  int rssiBarH = 6;
+  
+  display.drawRect(rssiBarX, rssiBarY, rssiBarW, rssiBarH, SSD1306_WHITE);
+  int rssiFill = map(fmRSSI, 0, 63, 0, rssiBarW - 2);
+  if (rssiFill > 0) {
+    display.fillRect(rssiBarX + 1, rssiBarY + 1, rssiFill, rssiBarH - 2, SSD1306_WHITE);
+  }
+  
+  display.setCursor(0, 52);
+  if (fmMuted) {
+    display.print("MUTE");
+  } else {
+    display.print("Vol:");
+    display.print(fmVolume);
+  }
+  
+  display.setCursor(50, 52);
+  display.print(fmStereo ? "STEREO" : "MONO");
+  
   display.display();
+}
+
+void drawFMPreset() {
+  display.clearDisplay();
+  drawStatusBar();
   
-  ledSuccess();
+  display.setTextSize(1);
+  display.setCursor(25, 12);
+  display.print("FM PRESETS");
   
-  // Initialize ESP-NOW
-  initESPNow();
-  
-  // Auto-connect WiFi
-  String savedSSID = preferences.getString("ssid", "");
-  String savedPassword = preferences.getString("password", "");
-  
-  if (savedSSID.length() > 0) {
-    showProgressBar("WiFi Connect", 0);
-    WiFi.begin(savedSSID.c_str(), savedPassword.c_str());
+  if (fmPresetCount == 0) {
+    display.setCursor(15, 35);
+    display.print("No presets");
+    display.setCursor(5, 50);
+    display.print("Save from Radio");
+  } else {
+    int startY = 22;
+    int itemHeight = 10;
     
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-      ledBlink(100);
-      delay(500);
-      attempts++;
-      showProgressBar("Connecting", attempts * 5);
+    for (int i = 0; i < fmPresetCount && i < 4; i++) {
+      int y = startY + (i * itemHeight);
+      
+      if (i == selectedPreset) {
+        display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.setTextColor(SSD1306_WHITE);
+      }
+      
+      display.setCursor(2, y + 1);
+      display.print(i + 1);
+      display.print(".");
+      
+      String freq = String(fmPresets[i].frequency / 100) + "." + String(fmPresets[i].frequency % 100 / 10);
+      display.setCursor(15, y + 1);
+      display.print(freq);
+      display.print(" MHz");
+      
+      display.setTextColor(SSD1306_WHITE);
     }
-    
-    if (WiFi.status() == WL_CONNECTED) {
-      ledSuccess();
-      showProgressBar("Connected!", 100);
-      delay(1000);
-      lastWiFiActivity = millis();
+  }
+  
+  display.display();
+}
+
+void drawFMMenu() {
+  display.clearDisplay();
+  drawStatusBar();
+  
+  display.setTextSize(1);
+  display.setCursor(30, 12);
+  display.print("FM MENU");
+  
+  const char* menuItems[] = {"Save Preset", "View Presets", "Back"};
+  int startY = 28;
+  int itemHeight = 12;
+  
+  for (int i = 0; i < 3; i++) {
+    int y = startY + (i * itemHeight);
+    if (i == menuSelection) {
+      display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
     } else {
-      ledError();
-      showStatus("Connection failed\nOpening WiFi menu", 2000);
-      currentState = STATE_WIFI_MENU;
+      display.setTextColor(SSD1306_WHITE);
+    }
+    display.setCursor(10, y + 2);
+    display.print(menuItems[i]);
+    display.setTextColor(SSD1306_WHITE);
+  }
+  
+  display.display();
+}
+
+// ============ MUSIC PLAYER FUNCTIONS ============
+bool initMusicPlayer() {
+  dfPlayerSerial.begin(9600, SERIAL_8N1, DFPLAYER_RX, DFPLAYER_TX);
+  delay(1500);
+  
+  Serial.println("Initializing DFPlayer Mini...");
+  Serial.print("  Using pins - RX:");
+  Serial.print(DFPLAYER_RX);
+  Serial.print(" TX:");
+  Serial.println(DFPLAYER_TX);
+  
+  if (!dfPlayer.begin(dfPlayerSerial, true, true)) {
+    Serial.println("✗ DFPlayer Failed!");
+    return false;
+  }
+  
+  Serial.println("✓ DFPlayer Detected!");
+  
+  dfPlayer.setTimeOut(500);
+  delay(200);
+  
+  totalTracks = dfPlayer.readFileCounts();
+  Serial.print("  Total Tracks: ");
+  Serial.println(totalTracks);
+  
+  if (totalTracks == 0 || totalTracks == -1 || totalTracks > 255) {
+    Serial.println("  ⚠ No MP3 files found!");
+    totalTracks = 0;
+  }
+  
+  dfPlayer.volume(currentVolume);
+  dfPlayer.EQ(DFPLAYER_EQ_NORMAL);
+  dfPlayer.outputDevice(DFPLAYER_DEVICE_SD);
+  
+  pinMode(DFPLAYER_BUSY, INPUT);
+  
+  if (totalTracks > 0) {
+    preferences.begin("music", true);
+    for (int i = 0; i < totalTracks && i < 50; i++) {
+      String key = "track" + String(i + 1);
+      trackNames[i] = preferences.getString(key.c_str(), "Track " + String(i + 1));
+    }
+    preferences.end();
+  }
+  
+  Serial.println("✓ DFPlayer Init Complete");
+  return true;
+}
+
+void playTrack(int track) {
+  if (track < 1) track = 1;
+  if (track > totalTracks) track = totalTracks;
+  
+  currentTrack = track;
+  dfPlayer.play(currentTrack);
+  isPlaying = true;
+  lastTrackChange = millis();
+  
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(100);
+  digitalWrite(LED_BUILTIN, LOW);
+}
+
+void nextTrack() {
+  if (millis() - lastTrackChange < 500) return;
+  
+  if (shuffleMode) {
+    currentTrack = random(1, totalTracks + 1);
+  } else {
+    currentTrack++;
+    if (currentTrack > totalTracks) {
+      currentTrack = repeatMode ? 1 : totalTracks;
+    }
+  }
+  playTrack(currentTrack);
+}
+
+void previousTrack() {
+  if (millis() - lastTrackChange < 500) return;
+  
+  currentTrack--;
+  if (currentTrack < 1) {
+    currentTrack = repeatMode ? totalTracks : 1;
+  }
+  playTrack(currentTrack);
+}
+
+void togglePlayPause() {
+  if (isPlaying) {
+    dfPlayer.pause();
+    isPlaying = false;
+  } else {
+    dfPlayer.start();
+    isPlaying = true;
+  }
+}
+
+void toggleShuffle() {
+  shuffleMode = !shuffleMode;
+  showStatus(shuffleMode ? "Shuffle ON" : "Shuffle OFF", 800);
+}
+
+void toggleRepeat() {
+  repeatMode = !repeatMode;
+  showStatus(repeatMode ? "Repeat ON" : "Repeat OFF", 800);
+}
+
+void changeVolume(int delta) {
+  if (millis() - lastVolumeChange < 200) return;
+  
+  currentVolume += delta;
+  currentVolume = constrain(currentVolume, 0, 30);
+  dfPlayer.volume(currentVolume);
+  lastVolumeChange = millis();
+  
+  digitalWrite(LED_BUILTIN, HIGH);
+  delay(50);
+  digitalWrite(LED_BUILTIN, LOW);
+}
+
+void applyEqualizer() {
+  switch(currentEQ) {
+    case 0:
+      dfPlayer.EQ(DFPLAYER_EQ_NORMAL);
+      break;
+    case 1:
+      dfPlayer.EQ(DFPLAYER_EQ_POP);
+      break;
+    case 2:
+      dfPlayer.EQ(DFPLAYER_EQ_ROCK);
+      break;
+    case 3:
+      dfPlayer.EQ(DFPLAYER_EQ_JAZZ);
+      break;
+    case 4:
+      dfPlayer.EQ(DFPLAYER_EQ_CLASSIC);
+      break;
+    case 5:
+      dfPlayer.EQ(DFPLAYER_EQ_BASS);
+      break;
+  }
+  
+  showStatus("EQ: " + String(eqNames[currentEQ]), 800);
+}
+
+void updateSpectrum() {
+  if (millis() - lastSpectrumUpdate < 100) return;
+  lastSpectrumUpdate = millis();
+  
+  if (isPlaying) {
+    for (int i = 0; i < 8; i++) {
+      int target = random(3, 20);
+      if (spectrumBars[i] < target) {
+        spectrumBars[i] += 2;
+      } else {
+        spectrumBars[i] -= 1;
+      }
+      spectrumBars[i] = constrain(spectrumBars[i], 0, 20);
     }
   } else {
-    currentState = STATE_WIFI_MENU;
+    for (int i = 0; i < 8; i++) {
+      if (spectrumBars[i] > 0) spectrumBars[i]--;
+    }
   }
-  
-  updateSystemStats();
-  showMainMenu();
 }
 
-void loop() {
-  unsigned long currentMillis = millis();
+void drawMusicPlayer() {
+  display.clearDisplay();
+  drawStatusBar();
   
-  loopCount++;
+  if (!musicPlayerAvailable) {
+    display.setTextSize(1);
+    display.setCursor(10, 25);
+    display.print("DFPlayer Mini");
+    display.setCursor(15, 35);
+    display.print("Not Found!");
+    display.setCursor(5, 48);
+    display.print("TX->GPIO20");
+    display.setCursor(5, 56);
+    display.print("RX->GPIO21");
+    display.display();
+    return;
+  }
   
-  // Zen Mode Logic
-  if (zenModeActive) {
-    ledZenMode();
+  if (totalTracks == 0) {
+    display.setTextSize(1);
+    display.setCursor(15, 25);
+    display.print("No MP3 Files");
+    display.setCursor(10, 35);
+    display.print("Insert SD Card");
+    display.setCursor(8, 48);
+    display.print("Format: FAT32");
+    display.setCursor(5, 56);
+    display.print("0001.mp3, etc.");
+    display.display();
+    return;
+  }
+  
+  isPlaying = (digitalRead(DFPLAYER_BUSY) == LOW);
+  
+  updateSpectrum();
+  
+  display.setTextSize(1);
+  if (isPlaying && (millis() / 500) % 2 == 0) {
+    display.setCursor(2, 12);
+    display.print("♪");
+  }
+  display.setCursor(12, 12);
+  display.print("NOW PLAYING");
+  
+  String trackName = trackNames[currentTrack - 1];
+  if (trackName.length() > 21) {
+    int scrollPos = (millis() / 300) % (trackName.length() + 5);
+    trackName = trackName + "     " + trackName;
+    trackName = trackName.substring(scrollPos, scrollPos + 21);
+  }
+  display.setCursor(2, 22);
+  display.print(trackName);
+  
+  int spectrumY = 33;
+  int barWidth = 14;
+  int barSpacing = 2;
+  
+  for (int i = 0; i < 8; i++) {
+    int x = 2 + (i * (barWidth + barSpacing));
+    int h = spectrumBars[i];
     
-    // Update zen breath animation
-    if (currentMillis % 4000 < 2000) {
-      zenBreathPhase = map(currentMillis % 2000, 0, 2000, 0, 100);
+    for (int j = 0; j < h; j += 3) {
+      display.fillRect(x, spectrumY + 20 - j, barWidth, 2, SSD1306_WHITE);
+    }
+    
+    display.drawRect(x, spectrumY, barWidth, 20, SSD1306_WHITE);
+  }
+  
+  display.setCursor(2, 55);
+  display.print(currentTrack);
+  display.print("/");
+  display.print(totalTracks);
+  
+  if (isPlaying) {
+    display.fillTriangle(28, 55, 28, 62, 35, 58, SSD1306_WHITE);
+  } else {
+    display.fillRect(28, 55, 3, 7, SSD1306_WHITE);
+    display.fillRect(32, 55, 3, 7, SSD1306_WHITE);
+  }
+  
+  if (repeatMode) {
+    display.setCursor(42, 55);
+    display.print("R");
+  }
+  
+  if (shuffleMode) {
+    display.setCursor(52, 55);
+    display.print("S");
+  }
+  
+  int volW = map(currentVolume, 0, 30, 0, 45);
+  display.drawRect(78, 55, 47, 7, SSD1306_WHITE);
+  if (volW > 0) {
+    display.fillRect(79, 56, volW, 5, SSD1306_WHITE);
+  }
+  
+  display.display();
+}
+
+void drawMusicPlaylist() {
+  display.clearDisplay();
+  drawStatusBar();
+  
+  display.setTextSize(1);
+  display.setCursor(30, 12);
+  display.print("PLAYLIST");
+  
+  int startY = 22;
+  int itemHeight = 10;
+  int maxVisible = 4;
+  int startIdx = max(0, playlistSelection - maxVisible + 1);
+  
+  for (int i = startIdx; i < totalTracks && i < startIdx + maxVisible; i++) {
+    int y = startY + ((i - startIdx) * itemHeight);
+    
+    if (i == playlistSelection) {
+      display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
     } else {
-      zenBreathPhase = map(currentMillis % 2000, 0, 2000, 100, 0);
+      display.setTextColor(SSD1306_WHITE);
     }
     
-    showZenMode();
+    display.setCursor(2, y + 1);
+    display.print(i + 1);
+    display.print(".");
     
-    // Check for exit button
-    if (digitalRead(BTN_BACK) == LOW || digitalRead(BTN_SELECT) == LOW) {
-      delay(200);
-      exitZenMode();
-    }
-    return;
-  }
-  
-  // Battery monitoring
-  if (currentMillis - lastBatteryCheck > batteryCheckInterval) {
-    updateBatteryLevel();
-    updateBatteryHistory();
-    checkBatteryHealth();
-    updatePowerConsumption();
-    lastBatteryCheck = currentMillis;
+    String name = trackNames[i];
+    if (name.length() > 18) name = name.substring(0, 18);
+    display.setCursor(15, y + 1);
+    display.print(name);
     
-    if (currentState != STATE_LOADING) {
-      refreshCurrentScreen();
-    }
-  }
-  
-  // System stats update
-  if (currentMillis - lastLoopTime > 1000) {
-    lastLoopCount = loopCount;
-    loopCount = 0;
-    lastLoopTime = currentMillis;
-    updateSystemStats();
-  }
-  
-  // WiFi timeout check
-  if (wifiAutoOffEnabled && WiFi.status() == WL_CONNECTED) {
-    checkWiFiTimeout();
-  }
-  
-  // Developer Mode Debug
-  if (devModeEnabled && currentState == STATE_DEVELOPER_MODE) {
-    if (currentMillis - devModeDebugTimer > 1000) {
-      devModeDebugTimer = currentMillis;
-      showDeveloperMode();
-    }
-  }
-  
-  // Interactive LED Patterns
-  if (!zenModeActive) {
-    switch(currentState) {
-      case STATE_LOADING:
-        ledPulse();
-        break;
-      case STATE_CHAT_RESPONSE:
-        ledBreathing();
-        break;
-      case STATE_CALCULATOR:
-        ledBlink(500);
-        break;
-      case STATE_POWER_BASE:
-      case STATE_POWER_VISUAL:
-      case STATE_POWER_STATS:
-      case STATE_POWER_GRAPH:
-      case STATE_POWER_CONSUMPTION:
-        if (isCharging) {
-          ledPulse();
-        } else if (batteryPercent < 20) {
-          ledBlink(250);
-        } else {
-          ledBreathing();
-        }
-        break;
-      case STATE_SYSTEM_INFO:
-        {
-          int rainbow = (millis() / 100) % 30;
-          digitalWrite(LED_BUILTIN, rainbow < 10 || (rainbow > 14 && rainbow < 20));
-        }
-        break;
-      case STATE_BATTERY_GUARDIAN:
-        if (batteryLeakWarning) {
-          ledBlink(150);
-        } else {
-          ledBreathing();
-        }
-        break;
-      case STATE_ESP_NOW_MENU:
-      case STATE_ESP_NOW_SEND:
-      case STATE_ESP_NOW_INBOX:
-        {
-          int pattern = (millis() / 200) % 6;
-          digitalWrite(LED_BUILTIN, pattern < 3);
-        }
-        break;
-      case STATE_DEVELOPER_MODE:
-        {
-          int devPattern = (millis() / 100) % 10;
-          digitalWrite(LED_BUILTIN, devPattern < 2 || (devPattern > 4 && devPattern < 7));
-        }
-        break;
-      case STATE_MAIN_MENU:
-      default:
-        ledHeartbeat();
-        break;
-    }
-  }
-  
-  // Loading animation
-  if (currentState == STATE_LOADING) {
-    if (currentMillis - lastLoadingUpdate > animSpeed) {
-      lastLoadingUpdate = currentMillis;
-      loadingFrame = (loadingFrame + 1) % 8;
-      showLoadingAnimation();
-    }
-  }
-  
-  // Button handling
-  if (currentMillis - lastDebounce > debounceDelay) {
-    bool buttonPressed = false;
-    
-    if (digitalRead(BTN_UP) == LOW) {
-      handleUp();
-      buttonPressed = true;
-    }
-    if (digitalRead(BTN_DOWN) == LOW) {
-      handleDown();
-      buttonPressed = true;
-    }
-    if (digitalRead(BTN_LEFT) == LOW) {
-      handleLeft();
-      buttonPressed = true;
-    }
-    if (digitalRead(BTN_RIGHT) == LOW) {
-      handleRight();
-      buttonPressed = true;
-    }
-    if (digitalRead(BTN_SELECT) == LOW) {
-      handleSelect();
-      buttonPressed = true;
-    }
-    if (digitalRead(BTN_BACK) == LOW) {
-      handleBackButton();
-      buttonPressed = true;
+    if (i + 1 == currentTrack) {
+      display.setCursor(SCREEN_WIDTH - 10, y + 1);
+      display.print(">");
     }
     
-    if (buttonPressed) {
-      lastDebounce = currentMillis;
-      ledQuickFlash();
-      if (WiFi.status() == WL_CONNECTED) {
-        lastWiFiActivity = currentMillis;
-      }
-    }
+    display.setTextColor(SSD1306_WHITE);
   }
+  
+  display.display();
 }
 
-// ========== ESP-NOW FUNCTIONS ==========
-
-void initESPNow() {
-  WiFi.mode(WIFI_AP_STA);
+void drawMusicMenu() {
+  display.clearDisplay();
+  drawStatusBar();
   
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("ESP-NOW init failed");
-    return;
+  display.setTextSize(1);
+  display.setCursor(25, 12);
+  display.print("MUSIC MENU");
+  
+  const char* menuItems[] = {"Playlist", "Equalizer", "Shuffle", "Repeat", "Back"};
+  int startY = 22;
+  int itemHeight = 8;
+  
+  for (int i = 0; i < 5; i++) {
+    int y = startY + (i * itemHeight);
+    
+    if (i == menuSelection) {
+      display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+    
+    display.setCursor(5, y);
+    display.print(menuItems[i]);
+    
+    // Show status indicators
+    if (i == 2 && shuffleMode) {
+      display.setCursor(SCREEN_WIDTH - 15, y);
+      display.print("ON");
+    }
+    if (i == 3 && repeatMode) {
+      display.setCursor(SCREEN_WIDTH - 15, y);
+      display.print("ON");
+    }
+    
+    display.setTextColor(SSD1306_WHITE);
   }
   
-  esp_now_register_recv_cb(onESPNowDataReceived);
-  esp_now_register_send_cb(onESPNowDataSent);
-  
-  Serial.println("ESP-NOW initialized");
-  
-  // Print MAC address
-  uint8_t mac[6];
-  WiFi.macAddress(mac);
-  Serial.printf("MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", 
-                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  display.display();
 }
 
-// ESP-NOW callback untuk versi Arduino Core terbaru
-void onESPNowDataReceived(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-  if (inboxCount >= MAX_MESSAGES) {
-    // Shift messages
-    for (int i = 0; i < MAX_MESSAGES - 1; i++) {
-      inbox[i] = inbox[i + 1];
+void drawMusicEqualizer() {
+  display.clearDisplay();
+  drawStatusBar();
+  
+  display.setTextSize(1);
+  display.setCursor(25, 12);
+  display.print("EQUALIZER");
+  
+  int startY = 24;
+  int itemHeight = 8;
+  
+  for (int i = 0; i < 6; i++) {
+    int y = startY + (i * itemHeight);
+    
+    if (i == currentEQ) {
+      display.fillRect(5, y, SCREEN_WIDTH - 10, itemHeight, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
     }
-    inboxCount = MAX_MESSAGES - 1;
+    
+    display.setCursor(15, y);
+    display.print(eqNames[i]);
+    
+    display.setTextColor(SSD1306_WHITE);
   }
   
-  Message newMsg;
-  strncpy(newMsg.text, (char*)data, min(len, 199));
-  newMsg.text[min(len, 199)] = '\0';
-  memcpy(newMsg.sender, info->src_addr, 6);
-  newMsg.timestamp = millis();
-  newMsg.read = false;
+  display.display();
+}
+
+// ============ ESP-NOW FUNCTIONS ============
+void onESPNowDataRecv(const esp_now_recv_info *recv_info, const uint8_t *data, int len) {
+  const uint8_t *mac = recv_info->src_addr;
+  memcpy(&incomingMsg, data, sizeof(incomingMsg));
   
-  inbox[inboxCount++] = newMsg;
+  String nickname = String(incomingMsg.nickname);
+  if (nickname.length() == 0) nickname = "Unknown";
   
-  ledQuickFlash();
-  Serial.println("Message received!");
+  bool peerExists = false;
+  for (int i = 0; i < espnowPeerCount; i++) {
+    if (memcmp(espnowPeers[i].mac, mac, 6) == 0) {
+      espnowPeers[i].lastSeen = millis();
+      espnowPeers[i].nickname = nickname;
+      espnowPeers[i].isActive = true;
+      peerExists = true;
+      break;
+    }
+  }
+  
+  if (!peerExists && espnowPeerCount < MAX_ESPNOW_PEERS) {
+    memcpy(espnowPeers[espnowPeerCount].mac, mac, 6);
+    espnowPeers[espnowPeerCount].nickname = nickname;
+    espnowPeers[espnowPeerCount].lastSeen = millis();
+    espnowPeers[espnowPeerCount].isActive = true;
+    espnowPeerCount++;
+  }
+  
+  if (incomingMsg.type == 'M') {
+    if (espnowMessageCount < MAX_ESPNOW_MESSAGES) {
+      strncpy(espnowMessages[espnowMessageCount].text, incomingMsg.text, ESPNOW_MESSAGE_MAX_LEN - 1);
+      memcpy(espnowMessages[espnowMessageCount].senderMAC, mac, 6);
+      espnowMessages[espnowMessageCount].isFromMe = false;
+      espnowMessageCount++;
+      digitalWrite(LED_BUILTIN, HIGH);
+      delay(50);
+      digitalWrite(LED_BUILTIN, LOW);
+    }
+  }
+  
+  if (currentState == STATE_ESPNOW_CHAT) {
+    espnowScrollOffset = espnowMessageCount * 10;
+  }
 }
 
 void onESPNowDataSent(const uint8_t *mac, esp_now_send_status_t status) {
   if (status == ESP_NOW_SEND_SUCCESS) {
-    ledSuccess();
-    showStatus("Message sent!", 1500);
-  } else {
-    ledError();
-    showStatus("Send failed!", 1500);
-  }
-  
-  if (currentState == STATE_ESP_NOW_SEND) {
-    showESPNowSend();
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(100);
+    digitalWrite(LED_BUILTIN, LOW);
   }
 }
 
-void addPeer(uint8_t* macAddr) {
-  if (peerCount >= MAX_ESP_PEERS) return;
+bool initESPNow() {
+  if (espnowInitialized) return true;
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  
+  if (esp_now_init() != ESP_OK) return false;
+  
+  esp_now_register_recv_cb(onESPNowDataRecv);
+  esp_now_register_send_cb(onESPNowDataSent);
   
   esp_now_peer_info_t peerInfo = {};
-  memcpy(peerInfo.peer_addr, macAddr, 6);
+  memset(&peerInfo, 0, sizeof(peerInfo));
+  memcpy(peerInfo.peer_addr, (uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, 6);
   peerInfo.channel = 0;
   peerInfo.encrypt = false;
   
-  if (esp_now_add_peer(&peerInfo) == ESP_OK) {
-    memcpy(peerAddresses[peerCount], macAddr, 6);
-    peerCount++;
-    ledSuccess();
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) return false;
+  
+  espnowInitialized = true;
+  
+  outgoingMsg.type = 'H';
+  strncpy(outgoingMsg.nickname, myNickname.c_str(), 19);
+  outgoingMsg.timestamp = millis();
+  esp_now_send((uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, (uint8_t *)&outgoingMsg, sizeof(outgoingMsg));
+  
+  return true;
+}
+
+void sendESPNowMessage(String message) {
+  if (!espnowInitialized) {
+    if (!initESPNow()) {
+      showStatus("ESP-NOW Failed!", 1500);
+      return;
+    }
+  }
+  
+  outgoingMsg.type = 'M';
+  strncpy(outgoingMsg.text, message.c_str(), ESPNOW_MESSAGE_MAX_LEN - 1);
+  strncpy(outgoingMsg.nickname, myNickname.c_str(), 19);
+  outgoingMsg.timestamp = millis();
+  
+  esp_err_t result;
+  
+  if (espnowBroadcastMode) {
+    result = esp_now_send((uint8_t[]){0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}, (uint8_t *)&outgoingMsg, sizeof(outgoingMsg));
   } else {
-    ledError();
+    if (selectedPeer < espnowPeerCount) {
+      result = esp_now_send(espnowPeers[selectedPeer].mac, (uint8_t *)&outgoingMsg, sizeof(outgoingMsg));
+    } else {
+      showStatus("No peer!", 1000);
+      return;
+    }
+  }
+  
+  if (result == ESP_OK) {
+    if (espnowMessageCount < MAX_ESPNOW_MESSAGES) {
+      strncpy(espnowMessages[espnowMessageCount].text, message.c_str(), ESPNOW_MESSAGE_MAX_LEN - 1);
+      memset(espnowMessages[espnowMessageCount].senderMAC, 0, 6);
+      espnowMessages[espnowMessageCount].isFromMe = true;
+      espnowMessageCount++;
+      espnowScrollOffset = espnowMessageCount * 10;
+    }
   }
 }
 
-void sendESPNowMessage(String message, uint8_t* targetMac) {
-  esp_now_send(targetMac, (uint8_t*)message.c_str(), message.length());
+// ============ DISPLAY FUNCTIONS ============
+void drawStatusBar() {
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  
+  if (musicPlayerAvailable && isPlaying) {
+    display.setCursor(0, 0);
+    display.print("♪");
+  }
+  
+  drawBatteryIcon(SCREEN_WIDTH - 22, 0);
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    int rssi = WiFi.RSSI();
+    int bars = map(rssi, -100, -50, 1, 4);
+    bars = constrain(bars, 1, 4);
+    for (int i = 0; i < 4; i++) {
+      int h = (i + 1) * 2;
+      if (i < bars) {
+        display.fillRect(85 + (i * 3), 8 - h, 2, h, SSD1306_WHITE);
+      } else {
+        display.drawRect(85 + (i * 3), 8 - h, 2, h, SSD1306_WHITE);
+      }
+    }
+  }
+  
+  if (espnowInitialized) {
+    display.setCursor(65, 0);
+    display.print("E:");
+    display.print(espnowPeerCount);
+  }
+  
+  if (chatMessageCount > 0) {
+    display.setCursor(15, 0);
+    display.print("M:");
+    display.print(chatMessageCount);
+  }
+  
+  display.drawFastHLine(0, 9, SCREEN_WIDTH, SSD1306_WHITE);
 }
 
-void showESPNowMenu() {
+void showStatus(String message, int delayMs) {
   display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  
+  int y = 20;
+  int start = 0;
+  while (start < message.length()) {
+    int end = message.indexOf('\n', start);
+    if (end == -1) end = message.length();
+    
+    String line = message.substring(start, end);
+    int x = (SCREEN_WIDTH - (line.length() * 6)) / 2;
+    display.setCursor(x, y);
+    display.print(line);
+    y += 10;
+    start = end + 1;
+  }
+  
+  display.display();
+  if (delayMs > 0) delay(delayMs);
+}
+
+void showProgressBar(String title, int percent) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  
+  int titleW = title.length() * 6;
+  display.setCursor((SCREEN_WIDTH - titleW) / 2, 20);
+  display.print(title);
+  
+  int barX = 10;
+  int barY = 35;
+  int barW = SCREEN_WIDTH - 20;
+  int barH = 8;
+  
+  display.drawRect(barX, barY, barW, barH, SSD1306_WHITE);
+  
+  int fillW = map(percent, 0, 100, 0, barW - 2);
+  if (fillW > 0) {
+    display.fillRect(barX + 1, barY + 1, fillW, barH - 2, SSD1306_WHITE);
+  }
+  
+  display.setCursor(SCREEN_WIDTH / 2 - 9, barY + 12);
+  display.print(percent);
+  display.print("%");
+  
+  display.display();
+}
+
+// ============ MAIN MENU ============
+void showMainMenu() {
+  display.clearDisplay();
+  drawStatusBar();
+  
+  display.setTextSize(1);
+  display.setCursor(30, 12);
+  display.print("MAIN MENU");
+  
+  const char* items[] = {"AI CHAT", "WIFI", "ESP-NOW", "MUSIC", "FM RADIO", "SYSTEM"};
+  int itemCount = 6;
+  
+  int startY = 20;
+  int itemHeight = 8;
+  
+  for (int i = 0; i < itemCount; i++) {
+    int y = startY + (i * itemHeight);
+    if (i == menuSelection) {
+      display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+    display.setCursor(10, y);
+    display.print(items[i]);
+    
+    if (i == 3 && !musicPlayerAvailable) {
+      display.setCursor(SCREEN_WIDTH - 10, y);
+      display.print("X");
+    }
+    if (i == 4 && !radioAvailable) {
+      display.setCursor(SCREEN_WIDTH - 10, y);
+      display.print("X");
+    }
+    
+    display.setTextColor(SSD1306_WHITE);
+  }
+  
+  display.display();
+}
+
+// ============ AI MODE SELECTION ============
+void showAIModeSelection() {
+  display.clearDisplay();
+  drawStatusBar();
   
   display.setTextSize(1);
   display.setCursor(20, 12);
-  display.print("ESP-NOW MESH");
+  display.print("SELECT MODE");
   
-  drawIcon(5, 12, ICON_MESSAGE);
+  const char* modes[] = {"SUBARU AWA", "STANDARD AI"};
+  int startY = 28;
+  int itemHeight = 15;
   
-  const char* menuItems[] = {
-    "Send Message",
-    "Inbox (",
-    "Manage Peers",
-    "Back"
-  };
-  
-  for (int i = 0; i < 4; i++) {
-    display.setCursor(10, 26 + i * 10);
-    if (i == menuSelection) {
-      display.print("> ");
+  for (int i = 0; i < 2; i++) {
+    int y = startY + (i * itemHeight);
+    if (i == (currentAIMode == MODE_SUBARU ? 0 : 1)) {
+      display.fillRect(5, y, SCREEN_WIDTH - 10, itemHeight - 2, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
     } else {
-      display.print("  ");
+      display.drawRect(5, y, SCREEN_WIDTH - 10, itemHeight - 2, SSD1306_WHITE);
+      display.setTextColor(SSD1306_WHITE);
     }
     
-    if (i == 1) {
-      display.print(menuItems[i]);
-      display.print(inboxCount);
-      display.print(")");
-    } else {
-      display.print(menuItems[i]);
-    }
+    int titleW = strlen(modes[i]) * 6;
+    display.setCursor((SCREEN_WIDTH - titleW) / 2, y + 4);
+    display.print(modes[i]);
+    display.setTextColor(SSD1306_WHITE);
   }
-  
-  // Show peer count
-  display.setCursor(85, 56);
-  display.print("Peers:");
-  display.print(peerCount);
   
   display.display();
 }
 
-void showESPNowSend() {
+// ============ WIFI MENU ============
+void showWiFiMenu() {
   display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
+  drawStatusBar();
   
   display.setTextSize(1);
-  display.setCursor(15, 2);
-  display.print("SEND MESSAGE");
+  display.setCursor(25, 12);
+  display.print("WIFI MANAGER");
   
-  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
-  
-  if (peerCount == 0) {
-    display.setCursor(10, 25);
-    display.print("No peers added!");
-    display.setCursor(5, 40);
-    display.print("Add in Manage Peers");
+  display.setCursor(5, 22);
+  if (WiFi.status() == WL_CONNECTED) {
+    String ssid = WiFi.SSID();
+    if (ssid.length() > 20) ssid = ssid.substring(0, 20);
+    display.print(ssid);
   } else {
-    display.setCursor(5, 15);
-    display.print("Select peer:");
-    
-    for (int i = 0; i < min(peerCount, 3); i++) {
-      display.setCursor(10, 28 + i * 10);
-      if (i == selectedPeer) {
-        display.print("> ");
-      } else {
-        display.print("  ");
-      }
-      
-      display.printf("%02X:%02X:%02X:%02X:%02X:%02X",
-                    peerAddresses[i][0], peerAddresses[i][1], 
-                    peerAddresses[i][2], peerAddresses[i][3],
-                    peerAddresses[i][4], peerAddresses[i][5]);
+    display.print("Not Connected");
+  }
+  
+  const char* menuItems[] = {"Scan", "Forget", "Back"};
+  int startY = 35;
+  int itemHeight = 10;
+  
+  for (int i = 0; i < 3; i++) {
+    int y = startY + (i * itemHeight);
+    if (i == menuSelection) {
+      display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
     }
+    display.setCursor(10, y + 1);
+    display.print(menuItems[i]);
+    display.setTextColor(SSD1306_WHITE);
   }
   
   display.display();
 }
 
-void showESPNowInbox() {
+// ============ WIFI SCAN ============
+void displayWiFiNetworks() {
   display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
+  drawStatusBar();
   
   display.setTextSize(1);
-  display.setCursor(35, 2);
-  display.print("INBOX (");
-  display.print(inboxCount);
+  display.setCursor(20, 12);
+  display.print("NETWORKS (");
+  display.print(networkCount);
   display.print(")");
   
-  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
-  
-  if (inboxCount == 0) {
-    display.setCursor(25, 30);
-    display.print("No messages");
+  if (networkCount == 0) {
+    display.setCursor(20, 35);
+    display.print("No networks");
   } else {
-    int startIdx = max(0, menuSelection);
-    int endIdx = min(inboxCount, startIdx + 4);
+    int startIdx = wifiPage * wifiPerPage;
+    int endIdx = min(networkCount, startIdx + wifiPerPage);
+    int itemHeight = 12;
+    int startY = 22;
     
     for (int i = startIdx; i < endIdx; i++) {
-      int y = 15 + (i - startIdx) * 12;
+      int y = startY + ((i - startIdx) * itemHeight);
       
-      if (i == menuSelection) {
-        display.fillRect(0, y, SCREEN_WIDTH, 11, SSD1306_WHITE);
+      if (i == selectedNetwork) {
+        display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);
       } else {
         display.setTextColor(SSD1306_WHITE);
       }
       
       display.setCursor(2, y + 2);
-      if (!inbox[i].read) {
-        display.print("* ");
+      String displaySSID = networks[i].ssid;
+      if (displaySSID.length() > 16) displaySSID = displaySSID.substring(0, 16);
+      display.print(displaySSID);
+      
+      if (networks[i].encrypted) {
+        display.setCursor(SCREEN_WIDTH - 10, y + 2);
+        display.print("L");
+      }
+      
+      display.setTextColor(SSD1306_WHITE);
+    }
+  }
+  
+  display.display();
+}
+
+// ============ KEYBOARD ============
+const char* getCurrentKey() {
+  if (currentKeyboardMode == MODE_LOWER) {
+    return keyboardLower[cursorY][cursorX];
+  } else if (currentKeyboardMode == MODE_UPPER) {
+    return keyboardUpper[cursorY][cursorX];
+  } else {
+    return keyboardNumbers[cursorY][cursorX];
+  }
+}
+
+void toggleKeyboardMode() {
+  if (currentKeyboardMode == MODE_LOWER) {
+    currentKeyboardMode = MODE_UPPER;
+  } else if (currentKeyboardMode == MODE_UPPER) {
+    currentKeyboardMode = MODE_NUMBERS;
+  } else {
+    currentKeyboardMode = MODE_LOWER;
+  }
+}
+
+void drawKeyboard() {
+  display.clearDisplay();
+  drawStatusBar();
+  
+  display.setTextSize(1);
+  display.setCursor(0, 12);
+  
+  String displayText = "";
+  if (keyboardContext == CONTEXT_WIFI_PASSWORD) {
+    for(unsigned int i=0; i<passwordInput.length(); i++) displayText += "*";
+  } else {
+    displayText = userInput;
+  }
+  
+  if (displayText.length() > 21) {
+    displayText = displayText.substring(displayText.length() - 21);
+  }
+  display.print(displayText);
+  
+  int startY = 24;
+  int keyW = 12;
+  int keyH = 12;
+  
+  for (int r = 0; r < 3; r++) {
+    for (int c = 0; c < 10; c++) {
+      int x = 1 + c * keyW;
+      int y = startY + r * keyH;
+      
+      const char* keyLabel;
+      if (currentKeyboardMode == MODE_LOWER) {
+        keyLabel = keyboardLower[r][c];
+      } else if (currentKeyboardMode == MODE_UPPER) {
+        keyLabel = keyboardUpper[r][c];
       } else {
-        display.print("  ");
+        keyLabel = keyboardNumbers[r][c];
       }
       
-      String msgPreview = String(inbox[i].text);
-      if (msgPreview.length() > 16) {
-        msgPreview = msgPreview.substring(0, 16) + "..";
+      if (r == cursorY && c == cursorX) {
+        display.fillRect(x, y, keyW, keyH, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.drawRect(x, y, keyW, keyH, SSD1306_WHITE);
+        display.setTextColor(SSD1306_WHITE);
       }
-      display.print(msgPreview);
       
+      int tX = x + 3;
+      if(strlen(keyLabel) > 1) tX = x + 1;
+      
+      display.setCursor(tX, y + 2);
+      display.print(keyLabel);
       display.setTextColor(SSD1306_WHITE);
     }
   }
@@ -822,1132 +1370,241 @@ void showESPNowInbox() {
   display.display();
 }
 
-void showESPNowPeers() {
+// ============ CHAT RESPONSE ============
+void displayResponse() {
   display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
+  drawStatusBar();
   
   display.setTextSize(1);
-  display.setCursor(20, 2);
-  display.print("MANAGE PEERS");
-  
-  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
-  
-  display.setCursor(5, 15);
-  display.print("Peers: ");
-  display.print(peerCount);
-  display.print("/");
-  display.print(MAX_ESP_PEERS);
-  
-  if (peerCount == 0) {
-    display.setCursor(5, 30);
-    display.print("Add peer MAC addr");
-    display.setCursor(5, 40);
-    display.print("via Serial console");
+  display.setCursor(10, 12);
+  if (currentAIMode == MODE_SUBARU) {
+    display.print("SUBARU");
   } else {
-    for (int i = 0; i < min(peerCount, 3); i++) {
-      display.setCursor(5, 28 + i * 10);
-      display.printf("%d. %02X:%02X:%02X:%02X:%02X:%02X",
-                    i + 1,
-                    peerAddresses[i][0], peerAddresses[i][1],
-                    peerAddresses[i][2], peerAddresses[i][3],
-                    peerAddresses[i][4], peerAddresses[i][5]);
-    }
+    display.print("STANDARD");
   }
   
-  display.display();
-}
-
-// ========== BATTERY GUARDIAN ==========
-
-void updateBatteryHistory() {
-  batteryHistory[batteryHistoryIndex] = batteryPercent;
-  batteryTimestamps[batteryHistoryIndex] = millis();
+  int y = 24 - scrollOffset;
+  int lineHeight = 10;
+  String word = "";
+  int x = 2;
   
-  batteryHistoryIndex = (batteryHistoryIndex + 1) % BATTERY_HISTORY_SIZE;
-  if (batteryHistoryIndex == 0) batteryHistoryFilled = true;
-}
-
-void checkBatteryHealth() {
-  if (!batteryHistoryFilled && batteryHistoryIndex < 5) return;
-  
-  int dataPoints = batteryHistoryFilled ? BATTERY_HISTORY_SIZE : batteryHistoryIndex;
-  if (dataPoints < 5) return;
-  
-  // Calculate drain rate (% per minute)
-  int oldIdx = batteryHistoryFilled ? batteryHistoryIndex : 0;
-  int recentIdx = batteryHistoryFilled ? 
-                  (batteryHistoryIndex - 1 + BATTERY_HISTORY_SIZE) % BATTERY_HISTORY_SIZE :
-                  batteryHistoryIndex - 1;
-  
-  int batteryDiff = batteryHistory[oldIdx] - batteryHistory[recentIdx];
-  unsigned long timeDiff = (batteryTimestamps[recentIdx] - batteryTimestamps[oldIdx]) / 60000; // minutes
-  
-  if (timeDiff > 0) {
-    batteryDrainRate = (float)batteryDiff / timeDiff;
-    
-    // Check for battery leak (>2% per minute)
-    if (batteryDrainRate > 2.0 && !isCharging) {
-      batteryLeakWarning = true;
+  for (unsigned int i = 0; i < aiResponse.length(); i++) {
+    char c = aiResponse.charAt(i);
+    if (c == ' ' || c == '\n' || i == aiResponse.length() - 1) {
+      if (i == aiResponse.length() - 1 && c != ' ' && c != '\n') {
+        word += c;
+      }
+      int wordWidth = word.length() * 6;
+      if (x + wordWidth > SCREEN_WIDTH - 2) {
+        y += lineHeight;
+        x = 2;
+      }
+      if (y >= 20 && y < SCREEN_HEIGHT) {
+        display.setCursor(x, y);
+        display.print(word);
+      }
+      x += wordWidth + 6;
+      word = "";
+      if (c == '\n') {
+        y += lineHeight;
+        x = 2;
+      }
     } else {
-      batteryLeakWarning = false;
-    }
-    
-    // Estimate time left
-    if (batteryDrainRate > 0 && !isCharging) {
-      estimatedMinutesLeft = (int)(batteryPercent / batteryDrainRate);
-    } else if (isCharging && batteryDrainRate < 0) {
-      estimatedMinutesLeft = (int)((100 - batteryPercent) / abs(batteryDrainRate));
-    } else {
-      estimatedMinutesLeft = -1;
-    }
-  }
-}
-
-void showBatteryGuardian() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
-  
-  display.setTextSize(1);
-  display.setCursor(5, 12);
-  display.print("BATTERY GUARDIAN");
-  
-  drawIcon(108, 12, ICON_POWER);
-  
-  display.drawLine(0, 22, SCREEN_WIDTH, 22, SSD1306_WHITE);
-  
-  // Battery status
-  display.setCursor(2, 26);
-  display.print("Level: ");
-  display.print(batteryPercent);
-  display.print("% (");
-  display.print(batteryVoltage, 2);
-  display.print("V)");
-  
-  // Drain rate
-  display.setCursor(2, 36);
-  display.print("Drain: ");
-  if (isCharging) {
-    display.print("+");
-    display.print(abs(batteryDrainRate), 2);
-    display.print("%/min");
-  } else {
-    display.print(batteryDrainRate, 2);
-    display.print("%/min");
-  }
-  
-  // Time estimate
-  display.setCursor(2, 46);
-  if (estimatedMinutesLeft > 0) {
-    if (isCharging) {
-      display.print("Full in: ");
-    } else {
-      display.print("Empty in: ");
-    }
-    
-    int hours = estimatedMinutesLeft / 60;
-    int mins = estimatedMinutesLeft % 60;
-    
-    if (hours > 0) {
-      display.print(hours);
-      display.print("h ");
-    }
-    display.print(mins);
-    display.print("m");
-  } else {
-    display.print("Time: Calculating...");
-  }
-  
-  // Warning
-  if (batteryLeakWarning) {
-    if ((millis() / 500) % 2 == 0) {
-      display.fillRect(0, 56, SCREEN_WIDTH, 8, SSD1306_WHITE);
-      display.setTextColor(SSD1306_BLACK);
-      display.setCursor(15, 57);
-      display.print("BATTERY LEAK!");
-      display.setTextColor(SSD1306_WHITE);
+      word += c;
     }
   }
   
   display.display();
 }
 
-// ========== POWER CONSUMPTION MONITOR ==========
-
-void updatePowerConsumption() {
-  // WiFi power estimation
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiPowerDraw = 80; // ~80mA when connected
-  } else if (WiFi.getMode() != WIFI_OFF) {
-    wifiPowerDraw = 120; // ~120mA when scanning
-  } else {
-    wifiPowerDraw = 0;
-  }
-  
-  // Display power (always on in this code)
-  displayPowerDraw = 20; // ~20mA for OLED
-  
-  // CPU power based on frequency
-  cpuPowerDraw = map(cpuFreq, 80, 160, 30, 60); // 30-60mA
-  
-  // Total power draw in mA
-  totalPowerDraw = wifiPowerDraw + displayPowerDraw + cpuPowerDraw;
-}
-
-void showPowerConsumption() {
+// ============ LOADING ANIMATION ============
+void showLoadingAnimation() {
   display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
+  drawStatusBar();
   
   display.setTextSize(1);
-  display.setCursor(10, 2);
-  display.print("POWER MONITOR");
+  display.setCursor(30, 25);
+  display.print("Thinking");
   
-  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
+  int cx = SCREEN_WIDTH / 2;
+  int cy = 45;
+  int r = 12;
   
-  // Component breakdown
-  display.setCursor(2, 15);
-  display.print("WiFi:");
-  display.setCursor(70, 15);
-  display.print(wifiPowerDraw, 0);
-  display.print(" mA");
-  
-  display.setCursor(2, 25);
-  display.print("Display:");
-  display.setCursor(70, 25);
-  display.print(displayPowerDraw, 0);
-  display.print(" mA");
-  
-  display.setCursor(2, 35);
-  display.print("CPU:");
-  display.setCursor(70, 35);
-  display.print(cpuPowerDraw, 0);
-  display.print(" mA");
-  
-  display.drawLine(2, 43, SCREEN_WIDTH - 2, 43, SSD1306_WHITE);
-  
-  display.setCursor(2, 46);
-  display.print("TOTAL:");
-  display.setCursor(70, 46);
-  display.print(totalPowerDraw, 0);
-  display.print(" mA");
-  
-  // Power bar graph
-  int graphY = 56;
-  int graphW = 126;
-  
-  int wifiBar = map(wifiPowerDraw, 0, totalPowerDraw, 0, graphW);
-  int displayBar = map(displayPowerDraw, 0, totalPowerDraw, 0, graphW);
-  int cpuBar = map(cpuPowerDraw, 0, totalPowerDraw, 0, graphW);
-  
-  display.fillRect(1, graphY, wifiBar, 3, SSD1306_WHITE);
-  display.fillRect(1, graphY + 3, displayBar, 2, SSD1306_WHITE);
-  display.fillRect(1, graphY + 5, cpuBar, 2, SSD1306_WHITE);
-  
-  display.display();
-}
-
-// ========== ZEN MODE ==========
-
-void enterZenMode() {
-  zenModeActive = true;
-  zenModeStartTime = millis();
-  
-  // Disconnect WiFi
-  WiFi.disconnect();
-  WiFi.mode(WIFI_OFF);
-  
-  showZenMode();
-}
-
-void exitZenMode() {
-  zenModeActive = false;
-  ledSuccess();
-  showStatus("Zen Mode ended\nWelcome back!", 2000);
-  currentState = STATE_SETTINGS_MENU;
-  showSettingsMenu();
-}
-
-void showZenMode() {
-  display.clearDisplay();
-  
-  // Calculate time in zen mode
-  unsigned long zenDuration = (millis() - zenModeStartTime) / 1000; // seconds
-  int zenMinutes = zenDuration / 60;
-  int zenSeconds = zenDuration % 60;
-  
-  // Minimal clock
-  display.setTextSize(2);
-  String timeStr = "";
-  if (zenMinutes < 10) timeStr += "0";
-  timeStr += String(zenMinutes);
-  timeStr += ":";
-  if (zenSeconds < 10) timeStr += "0";
-  timeStr += String(zenSeconds);
-  
-  int textW = timeStr.length() * 12;
-  display.setCursor((SCREEN_WIDTH - textW) / 2, 15);
-  display.print(timeStr);
-  
-  // Breathing circle animation
-  display.setTextSize(1);
-  int centerX = SCREEN_WIDTH / 2;
-  int centerY = 45;
-  int baseRadius = 8;
-  int breathRadius = baseRadius + map(zenBreathPhase, 0, 100, 0, 6);
-  
-  display.drawCircle(centerX, centerY, breathRadius, SSD1306_WHITE);
-  if (zenBreathPhase > 30 && zenBreathPhase < 70) {
-    display.drawCircle(centerX, centerY, breathRadius - 2, SSD1306_WHITE);
-  }
-  
-  // Battery indicator (minimal)
-  display.setCursor(2, 2);
-  display.print(batteryPercent);
-  display.print("%");
-  
-  // Zen message
-  display.setCursor(25, 58);
-  display.print("Breathe...");
-  
-  display.display();
-}
-
-// ========== DEVELOPER MODE ==========
-
-void showDeveloperMode() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
-  
-  display.setTextSize(1);
-  display.setCursor(15, 2);
-  display.print("DEVELOPER MODE");
-  
-  drawIcon(2, 2, ICON_DEV);
-  
-  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
-  
-  // Real-time debugging info
-  display.setCursor(2, 14);
-  display.print("Heap: ");
-  display.print(freeHeap / 1024);
-  display.print("/");
-  display.print(totalHeap / 1024);
-  display.print("KB");
-  
-  display.setCursor(2, 23);
-  display.print("Min Heap: ");
-  display.print(minFreeHeap / 1024);
-  display.print("KB");
-  
-  if (lowMemoryWarning) {
-    display.print(" !");
-  }
-  
-  display.setCursor(2, 32);
-  display.print("CPU: ");
-  display.print((int)cpuFreq);
-  display.print("MHz ");
-  display.print(cpuTemp, 1);
-  display.print("C");
-  
-  display.setCursor(2, 41);
-  display.print("Loop: ");
-  display.print(lastLoopCount);
-  display.print("/s");
-  
-  display.setCursor(2, 50);
-  display.print("Battery: ");
-  display.print(batteryDrainRate, 2);
-  display.print("%/m");
-  
-  // Status bar
-  if (lowMemoryWarning && (millis() / 500) % 2 == 0) {
-    display.fillRect(0, 58, SCREEN_WIDTH, 6, SSD1306_WHITE);
-    display.setTextColor(SSD1306_BLACK);
-    display.setCursor(20, 59);
-    display.print("LOW MEMORY!");
-    display.setTextColor(SSD1306_WHITE);
-  }
-  
-  display.display();
-}
-
-// ========== DISPLAY SETTINGS ==========
-
-void showDisplaySettings() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
-  
-  display.setTextSize(1);
-  display.setCursor(10, 2);
-  display.print("DISPLAY SETTINGS");
-  
-  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
-  
-  const char* menuItems[] = {
-    "Font Size",
-    "Anim Speed",
-    "Save & Back"
-  };
-  
-  for (int i = 0; i < 3; i++) {
-    display.setCursor(5, 20 + i * 12);
-    if (i == menuSelection) {
-      display.print("> ");
-    } else {
-      display.print("  ");
-    }
-    display.print(menuItems[i]);
-    
-    // Show current values
+  for (int i = 0; i < 8; i++) {
+    float angle = (loadingFrame + i) * (2 * PI / 8);
+    int x = cx + cos(angle) * r;
+    int y = cy + sin(angle) * r;
     if (i == 0) {
-      display.setCursor(90, 20 + i * 12);
-      display.print("[");
-      display.print(fontSize);
-      display.print("]");
-    } else if (i == 1) {
-      display.setCursor(90, 20 + i * 12);
-      display.print("[");
-      display.print(animSpeed);
-      display.print("]");
+      display.fillCircle(x, y, 2, SSD1306_WHITE);
+    } else {
+      display.drawCircle(x, y, 1, SSD1306_WHITE);
     }
   }
-  
-  // Preview
-  display.setCursor(5, 50);
-  display.print("Preview:");
-  display.setTextSize(fontSize);
-  display.setCursor(55, 48);
-  display.print("ABC");
   
   display.display();
 }
 
-// ========== SYSTEM INFO WITH CPU TEMP ==========
-
-void updateSystemStats() {
-  freeHeap = ESP.getFreeHeap();
-  totalHeap = ESP.getHeapSize();
-  minFreeHeap = ESP.getMinFreeHeap();
-  cpuFreq = ESP.getCpuFreqMHz();
-  
-  // Read CPU temperature
-  cpuTemp = temperatureRead();
-  
-  // Check for low memory
-  if (freeHeap < 20000) { // Less than 20KB
-    lowMemoryWarning = true;
-  } else {
-    lowMemoryWarning = false;
-  }
-}
-
+// ============ SYSTEM INFO ============
 void showSystemInfo() {
   display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
+  drawStatusBar();
   
   display.setTextSize(1);
-  display.setCursor(15, 2);
+  display.setCursor(20, 12);
   display.print("SYSTEM INFO");
   
-  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
+  display.setCursor(0, 22);
+  display.print("Temp: ");
+  display.print(temperatureRead(), 1);
+  display.print("C");
   
-  // Memory info
-  display.setCursor(2, 15);
-  display.print("Free Heap:");
-  display.setCursor(70, 15);
-  display.print(freeHeap / 1024);
-  display.print(" KB");
+  display.setCursor(0, 32);
+  display.print("RAM: ");
+  display.print(ESP.getFreeHeap() / 1024);
+  display.print("KB");
   
-  if (lowMemoryWarning) {
-    display.setCursor(110, 15);
-    display.print("!");
+  display.setCursor(0, 42);
+  display.print("Battery: ");
+  display.print(batteryVoltage);
+  display.print("mV ");
+  display.print(batteryPercent);
+  display.print("%");
+  
+  display.setCursor(0, 52);
+  display.print("Chat: ");
+  display.print(chatMessageCount);
+  display.print(" msgs");
+  
+  display.display();
+}
+
+// ============ ESP-NOW CHAT ============
+void drawESPNowChat() {
+  display.clearDisplay();
+  drawStatusBar();
+  
+  display.setTextSize(1);
+  display.setCursor(20, 12);
+  display.print("ESP-NOW CHAT");
+  
+  int startY = 22;
+  int msgHeight = 10;
+  int visibleMsgs = (SCREEN_HEIGHT - startY) / msgHeight;
+  int startIdx = max(0, espnowMessageCount - visibleMsgs);
+  
+  int y = startY;
+  
+  for (int i = startIdx; i < espnowMessageCount; i++) {
+    ESPNowMessage &msg = espnowMessages[i];
+    
+    display.setCursor(2, y);
+    if (msg.isFromMe) {
+      display.print(">");
+    } else {
+      display.print("<");
+    }
+    display.print(msg.text);
+    
+    y += msgHeight;
   }
   
-  display.setCursor(2, 24);
-  display.print("Total:");
-  display.setCursor(70, 24);
-  display.print(totalHeap / 1024);
-  display.print(" KB");
+  display.display();
+}
+
+// ============ ESP-NOW MENU ============
+void drawESPNowMenu() {
+  display.clearDisplay();
+  drawStatusBar();
   
-  // CPU info
-  display.setCursor(2, 33);
-  display.print("CPU Freq:");
-  display.setCursor(70, 33);
-  display.print((int)cpuFreq);
-  display.print(" MHz");
+  display.setTextSize(1);
+  display.setCursor(20, 12);
+  display.print("ESP-NOW MENU");
   
-  // CPU Temperature
-  display.setCursor(2, 42);
-  display.print("CPU Temp:");
-  display.setCursor(70, 42);
-  display.print(cpuTemp, 1);
-  display.print(" C");
+  display.setCursor(5, 22);
+  display.print("Status: ");
+  display.print(espnowInitialized ? "ON" : "OFF");
+  display.print(" P:");
+  display.print(espnowPeerCount);
   
-  // Loop rate
-  display.setCursor(2, 51);
-  display.print("Loop/sec:");
-  display.setCursor(70, 51);
-  display.print(lastLoopCount);
+  const char* menuItems[] = {"Chat", "View Peers", "Nickname", "Back"};
+  int startY = 32;
+  int itemHeight = 8;
   
-  // Health warning
-  if (lowMemoryWarning && (millis() / 500) % 2 == 0) {
-    display.fillRect(0, 58, SCREEN_WIDTH, 6, SSD1306_WHITE);
-    display.setTextColor(SSD1306_BLACK);
-    display.setCursor(25, 59);
-    display.print("LOW MEMORY");
+  for (int i = 0; i < 4; i++) {
+    int y = startY + (i * itemHeight);
+    if (i == menuSelection) {
+      display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+    display.setCursor(5, y);
+    display.print(menuItems[i]);
     display.setTextColor(SSD1306_WHITE);
   }
   
   display.display();
 }
 
-// ========== SETTINGS MENU ==========
-
-void showSettingsMenu() {
+// ============ ESP-NOW PEER LIST ============
+void drawESPNowPeerList() {
   display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
+  drawStatusBar();
   
   display.setTextSize(1);
-  display.setCursor(25, 2);
-  display.print("SETTINGS");
+  display.setCursor(20, 12);
+  display.print("PEERS (");
+  display.print(espnowPeerCount);
+  display.print(")");
   
-  drawIcon(10, 2, ICON_SETTINGS);
-  
-  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
-  
-  const char* menuItems[] = {
-    "WiFi Auto-Off",
-    "Display",
-    "System Info",
-    "Developer Mode",
-    "Zen Mode",
-    "Back"
-  };
-  
-  int visibleItems = 5;
-  int startIdx = max(0, settingsMenuSelection - 2);
-  int endIdx = min(6, startIdx + visibleItems);
-  
-  for (int i = startIdx; i < endIdx; i++) {
-    int y = 15 + (i - startIdx) * 10;
-    display.setCursor(5, y);
-    
-    if (i == settingsMenuSelection) {
-      display.print("> ");
-    } else {
-      display.print("  ");
-    }
-    display.print(menuItems[i]);
-    
-    // Show status
-    if (i == 0) {
-      display.setCursor(95, y);
-      display.print(wifiAutoOffEnabled ? "[ON]" : "[OFF]");
-    } else if (i == 3) {
-      display.setCursor(95, y);
-      display.print(devModeEnabled ? "[ON]" : "[OFF]");
-    }
-  }
-  
-  display.display();
-}
-
-void handleSettingsMenuSelect() {
-  switch(settingsMenuSelection) {
-    case 0: // Toggle WiFi Auto-Off
-      wifiAutoOffEnabled = !wifiAutoOffEnabled;
-      preferences.putBool("wifiAutoOff", wifiAutoOffEnabled);
-      ledSuccess();
-      if (wifiAutoOffEnabled) {
-        lastWiFiActivity = millis();
-        showStatus("WiFi Auto-Off\nENABLED", 1500);
-      } else {
-        showStatus("WiFi Auto-Off\nDISABLED", 1500);
-      }
-      showSettingsMenu();
-      break;
-    case 1: // Display Settings
-      previousState = currentState;
-      currentState = STATE_DISPLAY_SETTINGS;
-      menuSelection = 0;
-      showDisplaySettings();
-      break;
-    case 2: // System Info
-      previousState = currentState;
-      currentState = STATE_SYSTEM_INFO;
-      showSystemInfo();
-      break;
-    case 3: // Toggle Developer Mode
-      devModeEnabled = !devModeEnabled;
-      preferences.putBool("devMode", devModeEnabled);
-      ledSuccess();
-      if (devModeEnabled) {
-        showStatus("Developer Mode\nENABLED", 1500);
-        currentState = STATE_DEVELOPER_MODE;
-        showDeveloperMode();
-      } else {
-        showStatus("Developer Mode\nDISABLED", 1500);
-        showSettingsMenu();
-      }
-      break;
-    case 4: // Zen Mode
-      enterZenMode();
-      break;
-    case 5: // Back
-      currentState = STATE_MAIN_MENU;
-      menuSelection = 0;
-      showMainMenu();
-      break;
-  }
-}
-
-// ========== BREADCRUMB NAVIGATION ==========
-
-void drawBreadcrumb() {
-  String crumb = "";
-  
-  switch(currentState) {
-    case STATE_MAIN_MENU:
-      crumb = "Main";
-      break;
-    case STATE_WIFI_MENU:
-    case STATE_WIFI_SCAN:
-    case STATE_PASSWORD_INPUT:
-      crumb = "Main > WiFi";
-      break;
-    case STATE_CALCULATOR:
-      crumb = "Main > Calc";
-      break;
-    case STATE_POWER_BASE:
-    case STATE_POWER_VISUAL:
-    case STATE_POWER_STATS:
-    case STATE_POWER_GRAPH:
-    case STATE_POWER_CONSUMPTION:
-      crumb = "Main > Power";
-      break;
-    case STATE_SETTINGS_MENU:
-    case STATE_DISPLAY_SETTINGS:
-    case STATE_DEVELOPER_MODE:
-    case STATE_ZEN_MODE:
-    case STATE_SYSTEM_INFO:
-      crumb = "Main > Settings";
-      break;
-    case STATE_BATTERY_GUARDIAN:
-      crumb = "Main > Battery";
-      break;
-    case STATE_ESP_NOW_MENU:
-    case STATE_ESP_NOW_SEND:
-    case STATE_ESP_NOW_INBOX:
-    case STATE_ESP_NOW_PEERS:
-      crumb = "Main > ESP-NOW";
-      break;
-    case STATE_CHAT_RESPONSE:
-    case STATE_KEYBOARD:
-    case STATE_API_SELECT:
-      crumb = "Main > Chat";
-      break;
-    default:
-      crumb = "";
-  }
-  
-  if (crumb.length() > 0 && currentState != STATE_MAIN_MENU) {
-    // Draw breadcrumb at top
-    // (Will be drawn by individual screens)
-  }
-}
-
-// ========== ICON DRAWING ==========
-
-void drawIcon(int x, int y, const unsigned char* icon) {
-  for (int i = 0; i < 8; i++) {
-    byte row = pgm_read_byte(&icon[i]);
-    for (int j = 0; j < 8; j++) {
-      if (row & (1 << (7 - j))) {
-        display.drawPixel(x + j, y + i, SSD1306_WHITE);
-      }
-    }
-  }
-}
-
-// ========== MAIN MENU WITH ICONS ==========
-
-void showMainMenu() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    drawWiFiSignalBars();
-  }
-  
-  display.setTextSize(1);
-  
-  struct MenuItem {
-    const char* text;
-    const unsigned char* icon;
-  };
-  
-  MenuItem menuItems[] = {
-    {"Chat AI", ICON_CHAT},
-    {"WiFi", ICON_WIFI},
-    {"Calculator", ICON_CALC},
-    {"Power", ICON_POWER},
-    {"Battery Guard", ICON_POWER},
-    {"ESP-NOW", ICON_MESSAGE},
-    {"Settings", ICON_SETTINGS}
-  };
-  
-  int startY = 10;
-  int visibleItems = 5;
-  int startIdx = max(0, menuSelection - 2);
-  int endIdx = min(7, startIdx + visibleItems);
-  
-  for (int i = startIdx; i < endIdx; i++) {
-    int y = startY + (i - startIdx) * 10;
-    
-    // Draw icon
-    drawIcon(2, y, menuItems[i].icon);
-    
-    display.setCursor(14, y + 1);
-    if (i == menuSelection) {
-      display.print("> ");
-    } else {
-      display.print("  ");
-    }
-    display.print(menuItems[i].text);
-    
-    // Selection indicator
-    if (i == menuSelection && (millis() / 200) % 2 == 0) {
-      display.fillRect(SCREEN_WIDTH - 6, y, 4, 8, SSD1306_WHITE);
-    }
-  }
-  
-  display.display();
-}
-
-void showMainMenu() {
-  showIconMenu();
-}
-
-void handleMainMenuSelect() {
-  // Mapping berdasarkan selectedIconIndex
-  // ISI SESUAI URUTAN iconMenu[] array
-  switch(selectedIconIndex) {
-    case 0: // Chat AI
-      if (WiFi.status() == WL_CONNECTED) {
-        menuSelection = 0;
-        previousState = currentState;
-        currentState = STATE_API_SELECT;
-        showAPISelect();
-      } else {
-        ledError();
-        showStatus("WiFi not connected!\nGo to WiFi Settings", 2000);
-        showMainMenu();
-      }
-      break;
-    case 1: // WiFi
-      menuSelection = 0;
-      previousState = currentState;
-      currentState = STATE_WIFI_MENU;
-      showWiFiMenu();
-      break;
-    case 2: // Calculator
-      resetCalculator();
-      previousState = currentState;
-      currentState = STATE_CALCULATOR;
-      cursorX = 0;
-      cursorY = 0;
-      showCalculator();
-      break;
-    case 3: // Power
-      powerMenuSelection = 0;
-      previousState = currentState;
-      currentState = STATE_POWER_BASE;
-      showPowerBase();
-      break;
-    case 4: // Battery Guardian
-      previousState = currentState;
-      currentState = STATE_BATTERY_GUARDIAN;
-      showBatteryGuardian();
-      break;
-    case 5: // ESP-NOW
-      menuSelection = 0;
-      previousState = currentState;
-      currentState = STATE_ESP_NOW_MENU;
-      showESPNowMenu();
-      break;
-    case 6: // Settings
-      settingsMenuSelection = 0;
-      previousState = currentState;
-      currentState = STATE_SETTINGS_MENU;
-      showSettingsMenu();
-      break;
-  }
-}
-
-// ========== BACK BUTTON HANDLER ==========
-
-void handleBackButton() {
-  ledQuickFlash();
-  
-  switch(currentState) {
-    case STATE_MAIN_MENU:
-      // Already at main, do nothing
-      break;
-      
-    case STATE_WIFI_MENU:
-    case STATE_CALCULATOR:
-    case STATE_POWER_BASE:
-    case STATE_SETTINGS_MENU:
-    case STATE_BATTERY_GUARDIAN:
-    case STATE_ESP_NOW_MENU:
-      currentState = STATE_MAIN_MENU;
-      menuSelection = 0;
-      showMainMenu();
-      break;
-      
-    case STATE_WIFI_SCAN:
-    case STATE_PASSWORD_INPUT:
-      currentState = STATE_WIFI_MENU;
-      menuSelection = 0;
-      showWiFiMenu();
-      break;
-      
-    case STATE_POWER_VISUAL:
-    case STATE_POWER_STATS:
-    case STATE_POWER_GRAPH:
-    case STATE_POWER_CONSUMPTION:
-      currentState = STATE_POWER_BASE;
-      powerMenuSelection = 0;
-      showPowerBase();
-      break;
-      
-    case STATE_DISPLAY_SETTINGS:
-    case STATE_SYSTEM_INFO:
-    case STATE_DEVELOPER_MODE:
-      currentState = STATE_SETTINGS_MENU;
-      settingsMenuSelection = 0;
-      showSettingsMenu();
-      break;
-      
-    case STATE_ESP_NOW_SEND:
-    case STATE_ESP_NOW_INBOX:
-    case STATE_ESP_NOW_PEERS:
-      currentState = STATE_ESP_NOW_MENU;
-      menuSelection = 0;
-      showESPNowMenu();
-      break;
-      
-    case STATE_KEYBOARD:
-    case STATE_API_SELECT:
-    case STATE_CHAT_RESPONSE:
-      currentState = STATE_MAIN_MENU;
-      menuSelection = 0;
-      userInput = "";
-      aiResponse = "";
-      showMainMenu();
-      break;
-      
-    default:
-      currentState = STATE_MAIN_MENU;
-      menuSelection = 0;
-      showMainMenu();
-      break;
-  }
-}
-
-// ========== CONTINUATION OF EXISTING FUNCTIONS ==========
-
-void showPowerBase() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
-  
-  display.setTextSize(1);
-  display.setCursor(15, 2);
-  display.print("POWER CENTRAL");
-  
-  drawIcon(2, 2, ICON_POWER);
-  
-  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
-  
-  const char* menuItems[] = {
-    "Battery Visual",
-    "Statistics",
-    "Power Graph",
-    "Consumption",
-    "Back"
-  };
-  
-  for (int i = 0; i < 5; i++) {
-    display.setCursor(10, 16 + i * 9);
-    if (i == powerMenuSelection) {
-      display.print("> ");
-    } else {
-      display.print("  ");
-    }
-    display.print(menuItems[i]);
-  }
-  
-  display.display();
-}
-
-void handlePowerBaseSelect() {
-  previousState = currentState;
-  
-  switch(powerMenuSelection) {
-    case 0:
-      currentState = STATE_POWER_VISUAL;
-      showPowerVisual();
-      break;
-    case 1:
-      currentState = STATE_POWER_STATS;
-      showPowerStats();
-      break;
-    case 2:
-      currentState = STATE_POWER_GRAPH;
-      showPowerGraph();
-      break;
-    case 3:
-      currentState = STATE_POWER_CONSUMPTION;
-      showPowerConsumption();
-      break;
-    case 4:
-      currentState = STATE_MAIN_MENU;
-      menuSelection = 0;
-      showMainMenu();
-      break;
-  }
-}
-
-void showPowerVisual() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
-  
-  int battX = 20;
-  int battY = 14;
-  int battW = 70;
-  int battH = 36;
-  
-  display.fillRect(battX + 2, battY + 2, battW, battH, SSD1306_WHITE);
-  display.fillRect(battX, battY, battW, battH, SSD1306_BLACK);
-  
-  display.drawRect(battX, battY, battW, battH, SSD1306_WHITE);
-  display.drawRect(battX + 1, battY + 1, battW - 2, battH - 2, SSD1306_WHITE);
-  
-  display.fillRect(battX + battW, battY + 13, 7, 10, SSD1306_WHITE);
-  
-  int fillW = map(batteryPercent, 0, 100, 0, battW - 10);
-  
-  if (isCharging) {
-    int waveSpeed = (millis() / 60) % 30;
-    for (int i = 0; i < fillW; i++) {
-      int wave = abs(((i - waveSpeed) % 30) - 15);
-      if (wave < 8) {
-        int height = map(wave, 0, 8, battH - 10, 4);
-        display.drawLine(battX + 5 + i, battY + 5, 
-                        battX + 5 + i, battY + 5 + height, SSD1306_WHITE);
-      }
-    }
+  if (espnowPeerCount == 0) {
+    display.setCursor(15, 35);
+    display.print("No peers found");
+    display.setCursor(5, 50);
+    display.print("Wait for messages");
   } else {
-    for (int i = 0; i < fillW; i += 2) {
-      display.drawLine(battX + 5 + i, battY + 5,
-                      battX + 5 + i, battY + battH - 5, SSD1306_WHITE);
-    }
-  }
-  
-  display.setTextSize(2);
-  String percentText = String(batteryPercent) + "%";
-  int textW = percentText.length() * 12;
-  int textX = battX + (battW - textW) / 2;
-  int textY = battY + (battH - 16) / 2;
-  
-  display.setTextColor(SSD1306_BLACK);
-  display.setCursor(textX, textY);
-  display.print(percentText);
-  
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(2, 54);
-  display.print(batteryVoltage, 2);
-  display.print("V");
-  
-  display.setCursor(45, 54);
-  if (isCharging) {
-    display.print("CHARGING");
-  } else {
-    if (batteryPercent > 80) display.print("FULL");
-    else if (batteryPercent > 20) display.print("GOOD");
-    else display.print("LOW!");
-  }
-  
-  display.display();
-}
-
-void showPowerStats() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
-  
-  display.setTextSize(1);
-  display.setCursor(15, 2);
-  display.print("POWER STATS");
-  
-  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
-  
-  display.setCursor(2, 16);
-  display.print("Voltage:");
-  display.setCursor(70, 16);
-  display.print(batteryVoltage, 3);
-  display.print(" V");
-  
-  display.setCursor(2, 26);
-  display.print("Battery:");
-  display.setCursor(70, 26);
-  display.print(batteryPercent);
-  display.print(" %");
-  
-  display.setCursor(2, 36);
-  display.print("Status:");
-  display.setCursor(70, 36);
-  display.print(isCharging ? "CHARGING" : "DISCHARGING");
-  
-  display.setCursor(2, 46);
-  display.print("Power:");
-  display.setCursor(70, 46);
-  display.print(totalPowerDraw, 0);
-  display.print(" mA");
-  
-  display.display();
-}
-
-void showPowerGraph() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
-  
-  display.setTextSize(1);
-  display.setCursor(25, 2);
-  display.print("POWER GRAPH");
-  
-  int graphX = 10;
-  int graphY = 15;
-  int graphW = 108;
-  int graphH = 40;
-  
-  display.drawLine(graphX, graphY, graphX, graphY + graphH, SSD1306_WHITE);
-  display.drawLine(graphX, graphY + graphH, graphX + graphW, graphY + graphH, SSD1306_WHITE);
-  
-  int dataPoints = batteryHistoryFilled ? BATTERY_HISTORY_SIZE : batteryHistoryIndex;
-  if (dataPoints > 1) {
-    int startIdx = batteryHistoryFilled ? batteryHistoryIndex : 0;
+    int startY = 24;
+    int itemHeight = 10;
     
-    for (int i = 0; i < dataPoints - 1; i++) {
-      int idx1 = (startIdx + i) % BATTERY_HISTORY_SIZE;
-      int idx2 = (startIdx + i + 1) % BATTERY_HISTORY_SIZE;
+    for (int i = 0; i < espnowPeerCount && i < 4; i++) {
+      int y = startY + (i * itemHeight);
       
-      int x1 = graphX + (i * graphW / (dataPoints - 1));
-      int y1 = graphY + graphH - (batteryHistory[idx1] * graphH / 100);
-      int x2 = graphX + ((i + 1) * graphW / (dataPoints - 1));
-      int y2 = graphY + graphH - (batteryHistory[idx2] * graphH / 100);
+      if (i == selectedPeer) {
+        display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.setTextColor(SSD1306_WHITE);
+      }
       
-      display.drawLine(x1, y1, x2, y2, SSD1306_WHITE);
+      display.setCursor(2, y + 1);
+      String nickname = espnowPeers[i].nickname;
+      if (nickname.length() > 15) nickname = nickname.substring(0, 15);
+      display.print(nickname);
+      
+      display.setTextColor(SSD1306_WHITE);
     }
-  }
-  
-  display.setCursor(40, 58);
-  display.print("Now: ");
-  display.print(batteryPercent);
-  display.print("%");
-  
-  display.display();
-}
-
-void showWiFiMenu() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
-  
-  display.setTextSize(1);
-  display.setCursor(25, 2);
-  display.print("WiFi MENU");
-  
-  drawIcon(10, 2, ICON_WIFI);
-  
-  display.drawLine(0, 12, SCREEN_WIDTH, 12, SSD1306_WHITE);
-  
-  display.setCursor(5, 16);
-  if (WiFi.status() == WL_CONNECTED) {
-    display.print("Connected:");
-    display.setCursor(5, 24);
-    String ssid = WiFi.SSID();
-    if (ssid.length() > 18) {
-      ssid = ssid.substring(0, 18) + "..";
-    }
-    display.print(ssid);
-  } else {
-    display.print("Not connected");
-  }
-  
-  const char* menuItems[] = {"Scan Networks", "Forget Network", "Back"};
-  
-  for (int i = 0; i < 3; i++) {
-    display.setCursor(5, 36 + i * 9);
-    if (i == menuSelection) {
-      display.print("> ");
-    } else {
-      display.print("  ");
-    }
-    display.print(menuItems[i]);
   }
   
   display.display();
 }
 
-void handleWiFiMenuSelect() {
-  switch(menuSelection) {
-    case 0:
-      scanWiFiNetworks();
-      break;
-    case 1:
-      forgetNetwork();
-      break;
-    case 2:
-      currentState = STATE_MAIN_MENU;
-      menuSelection = 0;
-      showMainMenu();
-      break;
-  }
-}
-
+// ============ WIFI FUNCTIONS ============
 void scanWiFiNetworks() {
   showProgressBar("Scanning", 0);
-  
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   delay(100);
   
   showProgressBar("Scanning", 30);
-  
   int n = WiFi.scanNetworks();
-  networkCount = min(n, 20);
+  networkCount = min(n, 15);
   
   showProgressBar("Processing", 60);
-  
   for (int i = 0; i < networkCount; i++) {
     networks[i].ssid = WiFi.SSID(i);
     networks[i].rssi = WiFi.RSSI(i);
     networks[i].encrypted = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
   }
-  
-  showProgressBar("Sorting", 80);
   
   for (int i = 0; i < networkCount - 1; i++) {
     for (int j = i + 1; j < networkCount; j++) {
@@ -1961,477 +1618,69 @@ void scanWiFiNetworks() {
   
   showProgressBar("Complete", 100);
   delay(500);
-  
   selectedNetwork = 0;
   wifiPage = 0;
-  currentState = STATE_WIFI_SCAN;
-  displayWiFiNetworks();
-}
-
-void displayWiFiNetworks() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
-  
-  display.setTextSize(1);
-  display.setCursor(5, 0);
-  display.print("WiFi (");
-  display.print(networkCount);
-  display.print(")");
-  
-  display.drawLine(0, 10, SCREEN_WIDTH, 10, SSD1306_WHITE);
-  
-  if (networkCount == 0) {
-    display.setCursor(10, 25);
-    display.println("No networks found");
-  } else {
-    int startIdx = wifiPage * wifiPerPage;
-    int endIdx = min(networkCount, startIdx + wifiPerPage);
-    
-    for (int i = startIdx; i < endIdx; i++) {
-      int y = 12 + (i - startIdx) * 12;
-      
-      if (i == selectedNetwork) {
-        display.fillRect(0, y, SCREEN_WIDTH, 11, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK);
-      } else {
-        display.setTextColor(SSD1306_WHITE);
-      }
-      
-      display.setCursor(2, y + 2);
-      
-      String displaySSID = networks[i].ssid;
-      if (displaySSID.length() > 14) {
-        displaySSID = displaySSID.substring(0, 14) + "..";
-      }
-      display.print(displaySSID);
-      
-      if (networks[i].encrypted) {
-        display.setCursor(100, y + 2);
-        display.print("L");
-      }
-      
-      int bars = map(networks[i].rssi, -100, -50, 1, 4);
-      bars = constrain(bars, 1, 4);
-      display.setCursor(110, y + 2);
-      for (int b = 0; b < bars; b++) {
-        display.print("|");
-      }
-      
-      display.setTextColor(SSD1306_WHITE);
-    }
-    
-    // Page indicator
-    if (networkCount > wifiPerPage) {
-      display.setCursor(45, 56);
-      display.print("Pg ");
-      display.print(wifiPage + 1);
-      display.print("/");
-      display.print((networkCount + wifiPerPage - 1) / wifiPerPage);
-    }
-  }
-  
-  display.display();
-}
-
-void showCalculator() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
-  
-  display.setTextSize(1);
-  display.setCursor(30, 2);
-  display.print("CALCULATOR");
-  
-  drawIcon(15, 2, ICON_CALC);
-  
-  display.drawRect(2, 12, SCREEN_WIDTH - 4, 12, SSD1306_WHITE);
-  display.setCursor(6, 15);
-  String displayText = calcDisplay;
-  if (displayText.length() > 18) {
-    displayText = displayText.substring(displayText.length() - 18);
-  }
-  display.print(displayText);
-  
-  const char* calcPad[4][4] = {
-    {"7", "8", "9", "/"},
-    {"4", "5", "6", "*"},
-    {"1", "2", "3", "-"},
-    {"C", "0", "=", "+"}
-  };
-  
-  int startY = 28;
-  for (int row = 0; row < 4; row++) {
-    for (int col = 0; col < 4; col++) {
-      int x = col * 30 + 4;
-      int y = startY + row * 9;
-      
-      if (row == cursorY && col == cursorX) {
-        display.fillRect(x - 2, y - 1, 16, 8, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK);
-      } else {
-        display.setTextColor(SSD1306_WHITE);
-      }
-      
-      display.setCursor(x, y);
-      display.print(calcPad[row][col]);
-    }
-  }
-  
-  display.setTextColor(SSD1306_WHITE);
-  display.display();
-}
-
-void handleCalculatorInput() {
-  const char* calcPad[4][4] = {
-    {"7", "8", "9", "/"},
-    {"4", "5", "6", "*"},
-    {"1", "2", "3", "-"},
-    {"C", "0", "=", "+"}
-  };
-  
-  String key = calcPad[cursorY][cursorX];
-  
-  if (key == "C") {
-    resetCalculator();
-  } else if (key == "=") {
-    calculateResult();
-  } else if (key == "+" || key == "-" || key == "*" || key == "/") {
-    if (calcDisplay != "0" && calcDisplay != "Error") {
-      calcNumber1 = calcDisplay;
-      calcOperator = key.charAt(0);
-      calcNewNumber = true;
-    }
-  } else {
-    if (calcNewNumber || calcDisplay == "0" || calcDisplay == "Error") {
-      calcDisplay = key;
-      calcNewNumber = false;
-    } else {
-      if (calcDisplay.length() < 12) {
-        calcDisplay += key;
-      }
-    }
-  }
-  
-  showCalculator();
-}
-
-void calculateResult() {
-  if (calcNumber1.length() > 0 && calcOperator != ' ') {
-    float num1 = calcNumber1.toFloat();
-    float num2 = calcDisplay.toFloat();
-    float result = 0;
-    
-    switch(calcOperator) {
-      case '+': result = num1 + num2; break;
-      case '-': result = num1 - num2; break;
-      case '*': result = num1 * num2; break;
-      case '/':
-        if (num2 != 0) {
-          result = num1 / num2;
-        } else {
-          ledError();
-          calcDisplay = "Error";
-          calcNumber1 = "";
-          calcOperator = ' ';
-          calcNewNumber = true;
-          return;
-        }
-        break;
-    }
-    
-    ledSuccess();
-    
-    calcDisplay = String(result, 2);
-    while (calcDisplay.endsWith("0") && calcDisplay.indexOf('.') != -1) {
-      calcDisplay.remove(calcDisplay.length() - 1);
-    }
-    if (calcDisplay.endsWith(".")) {
-      calcDisplay.remove(calcDisplay.length() - 1);
-    }
-    
-    calcNumber1 = "";
-    calcOperator = ' ';
-    calcNewNumber = true;
-  }
-}
-
-void resetCalculator() {
-  calcDisplay = "0";
-  calcNumber1 = "";
-  calcOperator = ' ';
-  calcNewNumber = true;
-}
-
-void showAPISelect() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  drawBreadcrumb();
-  
-  display.setTextSize(1);
-  display.setCursor(15, 5);
-  display.print("SELECT GEMINI API");
-  
-  display.drawLine(0, 15, SCREEN_WIDTH, 15, SSD1306_WHITE);
-  
-  int y1 = 25;
-  if (menuSelection == 0) {
-    display.fillRect(5, y1 - 2, 118, 12, SSD1306_WHITE);
-    display.setTextColor(SSD1306_BLACK);
-  }
-  display.setCursor(10, y1);
-  display.print("1. Gemini API #1");
-  if (selectedAPIKey == 1) {
-    display.setCursor(100, y1);
-    display.print("[*]");
-  }
-  display.setTextColor(SSD1306_WHITE);
-  
-  int y2 = 42;
-  if (menuSelection == 1) {
-    display.fillRect(5, y2 - 2, 118, 12, SSD1306_WHITE);
-    display.setTextColor(SSD1306_BLACK);
-  }
-  display.setCursor(10, y2);
-  display.print("2. Gemini API #2");
-  if (selectedAPIKey == 2) {
-    display.setCursor(100, y2);
-    display.print("[*]");
-  }
-  display.setTextColor(SSD1306_WHITE);
-  
-  display.display();
-}
-
-void handleAPISelectSelect() {
-  if (menuSelection == 0) {
-    selectedAPIKey = 1;
-  } else {
-    selectedAPIKey = 2;
-  }
-  
-  ledSuccess();
-  
-  userInput = "";
-  currentState = STATE_KEYBOARD;
-  cursorX = 0;
-  cursorY = 0;
-  currentKeyboardMode = MODE_LOWER;
-  drawKeyboard();
-}
-
-void drawKeyboard() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  
-  if (currentState == STATE_PASSWORD_INPUT) {
-    display.print("Pass:");
-    String masked = "";
-    for (unsigned int i = 0; i < passwordInput.length(); i++) {
-      masked += "*";
-    }
-    String displayText = masked.substring(max(0, (int)masked.length() - 10));
-    display.print(displayText);
-  } else {
-    display.print(">");
-    String displayText = userInput.substring(max(0, (int)userInput.length() - 14));
-    display.print(displayText);
-  }
-  
-  display.setCursor(SCREEN_WIDTH - 18, 0);
-  if (currentKeyboardMode == MODE_UPPER) {
-    display.print("A");
-  } else if (currentKeyboardMode == MODE_NUMBERS) {
-    display.print("#");
-  } else {
-    display.print("a");
-  }
-  
-  display.drawLine(0, 10, SCREEN_WIDTH, 10, SSD1306_WHITE);
-  
-  int startY = 14;
-  const char* currentKeyboard[3][10];
-  
-  switch(currentKeyboardMode) {
-    case MODE_LOWER:
-      memcpy(currentKeyboard, keyboardLower, sizeof(keyboardLower));
-      break;
-    case MODE_UPPER:
-      memcpy(currentKeyboard, keyboardUpper, sizeof(keyboardUpper));
-      break;
-    case MODE_NUMBERS:
-      memcpy(currentKeyboard, keyboardNumbers, sizeof(keyboardNumbers));
-      break;
-  }
-  
-  for (int row = 0; row < 3; row++) {
-    for (int col = 0; col < 10; col++) {
-      int x = col * 12 + 2;
-      int y = startY + row * 16;
-      
-      if (row == cursorY && col == cursorX) {
-        display.fillRect(x - 1, y - 1, 11, 10, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK);
-      } else {
-        display.setTextColor(SSD1306_WHITE);
-      }
-      
-      display.setCursor(x, y);
-      
-      const char* key = currentKeyboard[row][col];
-      
-      if (strcmp(key, "OK") == 0) {
-        display.print("OK");
-      } else if (strcmp(key, "<") == 0) {
-        display.print("<");
-      } else if (strcmp(key, "#") == 0) {
-        display.print("#");
-      } else if (strcmp(key, " ") == 0) {
-        display.print("_");
-      } else {
-        display.print(key);
-      }
-    }
-  }
-  
-  display.display();
-}
-
-const char* getCurrentKey() {
-  switch(currentKeyboardMode) {
-    case MODE_LOWER:
-      return keyboardLower[cursorY][cursorX];
-    case MODE_UPPER:
-      return keyboardUpper[cursorY][cursorX];
-    case MODE_NUMBERS:
-      return keyboardNumbers[cursorY][cursorX];
-    default:
-      return keyboardLower[cursorY][cursorX];
-  }
-}
-
-void toggleKeyboardMode() {
-  switch(currentKeyboardMode) {
-    case MODE_LOWER:
-      currentKeyboardMode = MODE_UPPER;
-      break;
-    case MODE_UPPER:
-      currentKeyboardMode = MODE_NUMBERS;
-      break;
-    case MODE_NUMBERS:
-      currentKeyboardMode = MODE_LOWER;
-      break;
-  }
-}
-
-void handleKeyPress() {
-  const char* key = getCurrentKey();
-  
-  if (strcmp(key, "OK") == 0) {
-    if (userInput.length() > 0) {
-      sendToGemini();
-    }
-  } else if (strcmp(key, "<") == 0) {
-    if (userInput.length() > 0) {
-      userInput.remove(userInput.length() - 1);
-    }
-    drawKeyboard();
-  } else if (strcmp(key, "#") == 0) {
-    toggleKeyboardMode();
-    drawKeyboard();
-  } else {
-    userInput += key;
-    if (currentKeyboardMode == MODE_UPPER) {
-      currentKeyboardMode = MODE_LOWER;
-    }
-    drawKeyboard();
-  }
-}
-
-void handlePasswordKeyPress() {
-  const char* key = getCurrentKey();
-  
-  if (strcmp(key, "OK") == 0) {
-    if (passwordInput.length() > 0 || !networks[selectedNetwork].encrypted) {
-      connectToWiFi(selectedSSID, passwordInput);
-    }
-  } else if (strcmp(key, "<") == 0) {
-    if (passwordInput.length() > 0) {
-      passwordInput.remove(passwordInput.length() - 1);
-    }
-    drawKeyboard();
-  } else if (strcmp(key, "#") == 0) {
-    toggleKeyboardMode();
-    drawKeyboard();
-  } else {
-    passwordInput += key;
-    if (currentKeyboardMode == MODE_UPPER) {
-      currentKeyboardMode = MODE_LOWER;
-    }
-    drawKeyboard();
-  }
+  menuSelection = 0;
+  changeState(STATE_WIFI_SCAN);
 }
 
 void connectToWiFi(String ssid, String password) {
   showProgressBar("Connecting", 0);
-  
-  WiFi.disconnect();
-  delay(100);
   WiFi.begin(ssid.c_str(), password.c_str());
-  
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    ledBlink(100);
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
     delay(500);
     attempts++;
-    showProgressBar("Connecting", attempts * 3);
+    showProgressBar("Connecting", attempts * 5);
   }
   
   if (WiFi.status() == WL_CONNECTED) {
+    preferences.begin("app-config", false);
     preferences.putString("ssid", ssid);
     preferences.putString("password", password);
-    
-    ledSuccess();
-    showProgressBar("Connected!", 100);
-    delay(1000);
-    
-    lastWiFiActivity = millis();
-    
-    currentState = STATE_MAIN_MENU;
-    menuSelection = 0;
-    showMainMenu();
+    preferences.end();
+    showStatus("Connected!", 1500);
+    changeState(STATE_MAIN_MENU);
   } else {
-    ledError();
-    showStatus("Connection failed!", 2000);
-    currentState = STATE_WIFI_SCAN;
-    displayWiFiNetworks();
+    showStatus("Failed!", 1500);
+    changeState(STATE_WIFI_MENU);
   }
 }
 
 void forgetNetwork() {
-  preferences.clear();
-  WiFi.disconnect();
-  showStatus("Network forgotten!", 2000);
-  showWiFiMenu();
+  WiFi.disconnect(true, true);
+  preferences.begin("app-config", false);
+  preferences.putString("ssid", "");
+  preferences.putString("password", "");
+  preferences.end();
+  showStatus("Forgotten", 1500);
+  changeState(STATE_WIFI_MENU);
 }
 
-void checkWiFiTimeout() {
-  if (millis() - lastWiFiActivity > wifiTimeout) {
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-    showStatus("WiFi Auto-Off\nTimeout reached", 2000);
-    showMainMenu();
+// ============ AI CHAT ============
+String buildPrompt(String currentMessage) {
+  String prompt = "";
+  
+  if (currentAIMode == MODE_SUBARU) {
+    prompt += AI_SYSTEM_PROMPT_SUBARU;
+  } else {
+    prompt += AI_SYSTEM_PROMPT_STANDARD;
   }
+  prompt += "\n\n";
+  
+  if (chatHistory.length() > 0 && currentAIMode == MODE_SUBARU) {
+    prompt += "HISTORY:\n" + chatHistory + "\n\n";
+  }
+  
+  prompt += "USER: " + currentMessage + "\n\n";
+  prompt += "Jawab dengan singkat (maks 200 karakter):";
+  
+  return prompt;
 }
 
 void sendToGemini() {
   currentState = STATE_LOADING;
   loadingFrame = 0;
-  lastLoadingUpdate = millis();
   
   for (int i = 0; i < 5; i++) {
     showLoadingAnimation();
@@ -2440,212 +1689,241 @@ void sendToGemini() {
   }
   
   if (WiFi.status() != WL_CONNECTED) {
-    ledError();
-    aiResponse = "WiFi not connected!";
+    aiResponse = currentAIMode == MODE_SUBARU ? 
+      "WiFi nggak konek nih!" : 
+      "WiFi not connected";
     currentState = STATE_CHAT_RESPONSE;
     scrollOffset = 0;
-    displayResponse();
     return;
   }
   
-  const char* currentApiKey = (selectedAPIKey == 1) ? geminiApiKey1 : geminiApiKey2;
-  
   HTTPClient http;
-  String url = String(geminiEndpoint) + "?key=" + currentApiKey;
-  
+  String url = String(geminiEndpoint) + "?key=" + geminiApiKey1;
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
-  http.setTimeout(15000);
+  http.setTimeout(30000);
   
-  String escapedInput = userInput;
+  String enhancedPrompt = buildPrompt(userInput);
+  
+  String escapedInput = enhancedPrompt;
   escapedInput.replace("\\", "\\\\");
   escapedInput.replace("\"", "\\\"");
   escapedInput.replace("\n", "\\n");
+  escapedInput.replace("\r", "");
   
-  String jsonPayload = "{\"contents\":[{\"parts\":[{\"text\":\"" + escapedInput + "\"}]}]}";
+  String jsonPayload = "{\"contents\":[{\"parts\":[{\"text\":\"" + escapedInput + "\"}]}],";
+  jsonPayload += "\"generationConfig\":{";
+  jsonPayload += "\"temperature\":0.8,";
+  jsonPayload += "\"maxOutputTokens\":200";
+  jsonPayload += "}}";
   
   int httpResponseCode = http.POST(jsonPayload);
   
   if (httpResponseCode == 200) {
     String response = http.getString();
-    
-    StaticJsonDocument<16384> responseDoc;
+    JsonDocument responseDoc;
     DeserializationError error = deserializeJson(responseDoc, response);
     
-    if (!error && responseDoc.containsKey("candidates")) {
+    if (!error && !responseDoc["candidates"].isNull()) {
       JsonArray candidates = responseDoc["candidates"];
       if (candidates.size() > 0) {
         JsonObject content = candidates[0]["content"];
         JsonArray parts = content["parts"];
         if (parts.size() > 0) {
           aiResponse = parts[0]["text"].as<String>();
-          ledSuccess();
+          aiResponse.trim();
+          
+          String historyEntry = "U:" + userInput + "\nA:" + aiResponse + "\n";
+          if (chatHistory.length() + historyEntry.length() > 1000) {
+            int cutPos = chatHistory.indexOf("\n", 200);
+            if (cutPos != -1) {
+              chatHistory = chatHistory.substring(cutPos + 1);
+            }
+          }
+          chatHistory += historyEntry;
+          chatMessageCount++;
         } else {
-          aiResponse = "Error: Empty response";
+          aiResponse = "No response";
         }
       } else {
-        aiResponse = "Error: No candidates";
+        aiResponse = "Error response";
       }
     } else {
-      ledError();
-      aiResponse = "JSON Error";
+      aiResponse = "Parse error";
     }
   } else {
-    ledError();
-    aiResponse = "HTTP Error " + String(httpResponseCode);
+    aiResponse = "HTTP Error: " + String(httpResponseCode);
   }
   
   http.end();
-  lastWiFiActivity = millis();
-  
   currentState = STATE_CHAT_RESPONSE;
   scrollOffset = 0;
-  displayResponse();
 }
 
-void displayResponse() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  
-  int y = 12 - scrollOffset;
-  int lineHeight = 10;
-  String word = "";
-  int x = 0;
-  
-  for (unsigned int i = 0; i < aiResponse.length(); i++) {
-    char c = aiResponse.charAt(i);
-    
-    if (c == ' ' || c == '\n' || i == aiResponse.length() - 1) {
-      if (i == aiResponse.length() - 1 && c != ' ' && c != '\n') {
-        word += c;
-      }
-      
-      int wordWidth = word.length() * 6;
-      
-      if (x + wordWidth > SCREEN_WIDTH - 10) {
-        y += lineHeight;
-        x = 0;
-      }
-      
-      if (y >= -lineHeight && y < SCREEN_HEIGHT) {
-        display.setCursor(x, y);
-        display.print(word);
-      }
-      
-      x += wordWidth + 6;
-      word = "";
-      
-      if (c == '\n') {
-        y += lineHeight;
-        x = 0;
-      }
+// ============ STATE CHANGE ============
+void changeState(AppState newState) {
+  currentState = newState;
+}
+
+// ============ MENU HANDLERS ============
+void handleMainMenuSelect() {
+  if (menuSelection == 0) {
+    // AI CHAT
+    if (WiFi.status() == WL_CONNECTED) {
+      isSelectingMode = true;
+      showAIModeSelection();
     } else {
-      word += c;
+      showStatus("WiFi OFF!", 1500);
+    }
+  } else if (menuSelection == 1) {
+    // WIFI
+    menuSelection = 0;
+    changeState(STATE_WIFI_MENU);
+  } else if (menuSelection == 2) {
+    // ESP-NOW
+    menuSelection = 0;
+    if (!espnowInitialized) {
+      if (initESPNow()) {
+        showStatus("ESP-NOW ON!", 1000);
+      } else {
+        showStatus("ESP-NOW FAIL!", 1500);
+        return;
+      }
+    }
+    changeState(STATE_ESPNOW_MENU);
+  } else if (menuSelection == 3) {
+    // MUSIC
+    changeState(STATE_MUSIC_PLAYER);
+  } else if (menuSelection == 4) {
+    // FM RADIO
+    changeState(STATE_FM_RADIO);
+  } else if (menuSelection == 5) {
+    // SYSTEM
+    changeState(STATE_SYSTEM_INFO);
+  }
+}
+
+void handleWiFiMenuSelect() {
+  switch(menuSelection) {
+    case 0:
+      menuSelection = 0;
+      scanWiFiNetworks();
+      break;
+    case 1:
+      forgetNetwork();
+      menuSelection = 0;
+      break;
+    case 2:
+      menuSelection = 0;
+      changeState(STATE_MAIN_MENU);
+      break;
+  }
+}
+
+void handleESPNowMenuSelect() {
+  switch(menuSelection) {
+    case 0:
+      changeState(STATE_ESPNOW_CHAT);
+      break;
+    case 1:
+      selectedPeer = 0;
+      changeState(STATE_ESPNOW_PEER_LIST);
+      break;
+    case 2:
+      userInput = myNickname;
+      keyboardContext = CONTEXT_ESPNOW_NICKNAME;
+      cursorX = 0;
+      cursorY = 0;
+      currentKeyboardMode = MODE_LOWER;
+      changeState(STATE_KEYBOARD);
+      break;
+    case 3:
+      menuSelection = 0;
+      changeState(STATE_MAIN_MENU);
+      break;
+  }
+}
+
+void handleMusicMenuSelect() {
+  switch(menuSelection) {
+    case 0: // Playlist
+      playlistSelection = currentTrack - 1;
+      changeState(STATE_MUSIC_PLAYLIST);
+      break;
+    case 1: // Equalizer
+      changeState(STATE_MUSIC_EQUALIZER);
+      break;
+    case 2: // Shuffle
+      toggleShuffle();
+      break;
+    case 3: // Repeat
+      toggleRepeat();
+      break;
+    case 4: // Back
+      menuSelection = 0;
+      changeState(STATE_MUSIC_PLAYER);
+      break;
+  }
+}
+
+void handleKeyPress() {
+  const char* key = getCurrentKey();
+  if (strcmp(key, "OK") == 0) {
+    if (keyboardContext == CONTEXT_CHAT) {
+      if (userInput.length() > 0) {
+        sendToGemini();
+      }
+    } else if (keyboardContext == CONTEXT_ESPNOW_CHAT) {
+      if (userInput.length() > 0) {
+        sendESPNowMessage(userInput);
+        userInput = "";
+        changeState(STATE_ESPNOW_CHAT);
+      }
+    } else if (keyboardContext == CONTEXT_ESPNOW_NICKNAME) {
+      if (userInput.length() > 0) {
+        myNickname = userInput;
+        preferences.begin("app-config", false);
+        preferences.putString("espnow_nick", myNickname);
+        preferences.end();
+        showStatus("Saved!", 1000);
+        changeState(STATE_ESPNOW_MENU);
+      }
+    }
+  } else if (strcmp(key, "<") == 0) {
+    if (userInput.length() > 0) {
+      userInput.remove(userInput.length() - 1);
+    }
+  } else if (strcmp(key, "#") == 0) {
+    toggleKeyboardMode();
+  } else {
+    if (userInput.length() < 100) {
+      userInput += key;
     }
   }
-  
-  display.display();
 }
 
-void showLoadingAnimation() {
-  display.clearDisplay();
-  drawBatteryIndicator();
-  
-  display.setTextSize(1);
-  display.setCursor(20, 10);
-  display.print("Loading AI");
-  
-  int dots = (loadingFrame % 4);
-  for (int i = 0; i < dots; i++) {
-    display.print(".");
-  }
-  
-  int centerX = SCREEN_WIDTH / 2;
-  int centerY = 35;
-  int radius = 12;
-  
-  display.drawCircle(centerX, centerY, radius, SSD1306_WHITE);
-  
-  float angle = loadingFrame * PI / 4;
-  int x2 = centerX + cos(angle) * radius;
-  int y2 = centerY + sin(angle) * radius;
-  
-  display.drawLine(centerX, centerY, x2, y2, SSD1306_WHITE);
-  
-  display.display();
-}
-
-void showProgressBar(String title, int percent) {
-  display.clearDisplay();
-  
-  display.setTextSize(1);
-  int titleW = title.length() * 6;
-  display.setCursor((SCREEN_WIDTH - titleW) / 2, 15);
-  display.print(title);
-  
-  int barX = 10;
-  int barY = 30;
-  int barW = SCREEN_WIDTH - 20;
-  int barH = 12;
-  
-  display.drawRect(barX, barY, barW, barH, SSD1306_WHITE);
-  
-  int fillW = map(percent, 0, 100, 0, barW - 4);
-  display.fillRect(barX + 2, barY + 2, fillW, barH - 4, SSD1306_WHITE);
-  
-  display.setCursor(55, 47);
-  display.print(percent);
-  display.print("%");
-  
-  display.display();
-}
-
-void showStatus(String message, int delayMs) {
-  display.clearDisplay();
-  display.setTextSize(1);
-  
-  int y = 20;
-  int x = 0;
-  String word = "";
-  
-  for (unsigned int i = 0; i < message.length(); i++) {
-    char c = message.charAt(i);
-    
-    if (c == '\n') {
-      display.setCursor(x, y);
-      display.print(word);
-      word = "";
-      y += 10;
-      x = 0;
-    } else if (c == ' ') {
-      word += c;
-      int wordWidth = word.length() * 6;
-      if (x + wordWidth > SCREEN_WIDTH) {
-        y += 10;
-        x = 0;
-      }
-      display.setCursor(x, y);
-      display.print(word);
-      x += wordWidth;
-      word = "";
-    } else {
-      word += c;
+void handlePasswordKeyPress() {
+  const char* key = getCurrentKey();
+  if (strcmp(key, "OK") == 0) {
+    connectToWiFi(selectedSSID, passwordInput);
+  } else if (strcmp(key, "<") == 0) {
+    if (passwordInput.length() > 0) {
+      passwordInput.remove(passwordInput.length() - 1);
     }
+  } else if (strcmp(key, "#") == 0) {
+    toggleKeyboardMode();
+  } else {
+    passwordInput += key;
   }
-  
-  if (word.length() > 0) {
-    display.setCursor(x, y);
-    display.print(word);
-  }
-  
-  display.display();
-  delay(delayMs);
 }
 
+// ============ REFRESH SCREEN ============
 void refreshCurrentScreen() {
+  if (isSelectingMode) {
+    showAIModeSelection();
+    return;
+  }
+  
   switch(currentState) {
     case STATE_MAIN_MENU:
       showMainMenu();
@@ -2656,504 +1934,572 @@ void refreshCurrentScreen() {
     case STATE_WIFI_SCAN:
       displayWiFiNetworks();
       break;
-    case STATE_CALCULATOR:
-      showCalculator();
+    case STATE_KEYBOARD:
+      drawKeyboard();
       break;
-    case STATE_POWER_BASE:
-      showPowerBase();
+    case STATE_PASSWORD_INPUT:
+      drawKeyboard();
       break;
-    case STATE_POWER_VISUAL:
-      showPowerVisual();
+    case STATE_CHAT_RESPONSE:
+      displayResponse();
       break;
-    case STATE_POWER_STATS:
-      showPowerStats();
-      break;
-    case STATE_POWER_GRAPH:
-      showPowerGraph();
-      break;
-    case STATE_POWER_CONSUMPTION:
-      showPowerConsumption();
-      break;
-    case STATE_API_SELECT:
-      showAPISelect();
+    case STATE_LOADING:
+      showLoadingAnimation();
       break;
     case STATE_SYSTEM_INFO:
       showSystemInfo();
       break;
-    case STATE_SETTINGS_MENU:
-      showSettingsMenu();
+    case STATE_ESPNOW_CHAT:
+      drawESPNowChat();
       break;
-    case STATE_DISPLAY_SETTINGS:
-      showDisplaySettings();
+    case STATE_ESPNOW_MENU:
+      drawESPNowMenu();
       break;
-    case STATE_DEVELOPER_MODE:
-      showDeveloperMode();
+    case STATE_ESPNOW_PEER_LIST:
+      drawESPNowPeerList();
       break;
-    case STATE_BATTERY_GUARDIAN:
-      showBatteryGuardian();
+    case STATE_MUSIC_PLAYER:
+      drawMusicPlayer();
       break;
-    case STATE_ESP_NOW_MENU:
-      showESPNowMenu();
+    case STATE_MUSIC_PLAYLIST:
+      drawMusicPlaylist();
       break;
-    case STATE_ESP_NOW_SEND:
-      showESPNowSend();
+    case STATE_MUSIC_MENU:
+      drawMusicMenu();
       break;
-    case STATE_ESP_NOW_INBOX:
-      showESPNowInbox();
+    case STATE_MUSIC_EQUALIZER:
+      drawMusicEqualizer();
       break;
-    case STATE_ESP_NOW_PEERS:
-      showESPNowPeers();
+    case STATE_FM_RADIO:
+      drawFMRadio();
       break;
-    case STATE_KEYBOARD:
-    case STATE_PASSWORD_INPUT:
-      drawKeyboard();
+    case STATE_FM_MENU:
+      drawFMMenu();
       break;
-    case STATE_CHAT_RESPONSE:
-      displayResponse();
+    case STATE_FM_PRESET:
+      drawFMPreset();
+      break;
+    default:
+      showMainMenu();
       break;
   }
 }
 
-void updateBatteryLevel() {
-  int adcSum = 0;
-  for (int i = 0; i < 10; i++) {
-    adcSum += analogRead(BATTERY_PIN);
-    delay(5);
+// ============ SETUP ============
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  
+  Serial.println("\n=== ESP32-C3 AI POCKET ===");
+  Serial.println("Pin Configuration:");
+  Serial.println("  OLED I2C: SDA=GPIO9, SCL=GPIO10");
+  Serial.println("  DFPlayer: RX=GPIO20, TX=GPIO21");
+  Serial.println("==========================\n");
+  
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, LOW);
+  
+  pinMode(BTN_OK, INPUT_PULLUP);
+  pinMode(BTN_UP, INPUT_PULLUP);
+  pinMode(BTN_DOWN, INPUT_PULLUP);
+  pinMode(BTN_LEFT, INPUT_PULLUP);
+  pinMode(BTN_RIGHT, INPUT_PULLUP);
+  pinMode(BTN_BACK, INPUT_PULLUP);
+  Serial.println("✓ Buttons Init");
+  
+  pinMode(BATTERY_PIN, INPUT);
+  analogReadResolution(12);
+  updateBatteryStatus();
+  Serial.println("✓ Battery Monitor Init");
+  
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Serial.println("✓ I2C Init (SDA:9, SCL:10)");
+  
+  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println("✗ OLED FAILED!");
+    for(;;);
   }
-  int adcValue = adcSum / 10;
+  Serial.println("✓ OLED Init");
   
-  float adcVoltage = (adcValue / 4095.0) * 3.3;
-  batteryVoltage = adcVoltage * VOLTAGE_DIVIDER_RATIO;
-  
-  batteryPercent = map(batteryVoltage * 100, BATTERY_MIN_VOLTAGE * 100, BATTERY_MAX_VOLTAGE * 100, 0, 100);
-  batteryPercent = constrain(batteryPercent, 0, 100);
-  
-  int chargingSum = 0;
-  for (int i = 0; i < 5; i++) {
-    chargingSum += analogRead(CHARGING_PIN);
-    delay(2);
-  }
-  int chargingValue = chargingSum / 5;
-  float chargingVoltage = (chargingValue / 4095.0) * 3.3 * VOLTAGE_DIVIDER_RATIO;
-  
-  isCharging = (chargingVoltage > batteryVoltage + 0.3);
-}
-
-void drawBatteryIndicator() {
-  int battX = SCREEN_WIDTH - 24;
-  int battY = 1;
-  int battWidth = 22;
-  int battHeight = 8;
-  
-  display.drawRect(battX, battY, battWidth, battHeight, SSD1306_WHITE);
-  display.fillRect(battX + battWidth, battY + 2, 2, battHeight - 4, SSD1306_WHITE);
-  
-  int fillWidth = map(batteryPercent, 0, 100, 0, battWidth - 4);
-  
-  if (batteryPercent > 20) {
-    display.fillRect(battX + 2, battY + 2, fillWidth, battHeight - 4, SSD1306_WHITE);
-  } else if (batteryPercent > 10) {
-    if ((millis() / 500) % 2 == 0) {
-      display.fillRect(battX + 2, battY + 2, fillWidth, battHeight - 4, SSD1306_WHITE);
-    }
-  } else {
-    if ((millis() / 250) % 2 == 0) {
-      display.fillRect(battX + 2, battY + 2, fillWidth, battHeight - 4, SSD1306_WHITE);
-    }
-  }
-  
-  display.setTextSize(1);
-  
-  String percentText = String(batteryPercent);
-  int textWidth = percentText.length() * 6;
-  int textX = battX + (battWidth - textWidth) / 2;
-  int textY = battY + 1;
-  
-  if (batteryPercent > 50) {
-    display.setTextColor(SSD1306_BLACK);
-  } else {
-    display.setTextColor(SSD1306_WHITE);
-  }
-  
-  display.setCursor(textX, textY);
-  display.print(batteryPercent);
-  
-  if (isCharging) {
-    drawChargingPlug();
-  }
-  
+  display.clearDisplay();
+  display.setTextSize(2);
   display.setTextColor(SSD1306_WHITE);
-}
-
-void drawChargingPlug() {
-  int plugX = SCREEN_WIDTH - 35;
-  int plugY = 2;
+  display.setCursor(10, 10);
+  display.println("AI POCKET");
+  display.setTextSize(1);
+  display.setCursor(15, 30);
+  display.println("ESP32-C3");
+  display.setCursor(10, 45);
+  display.println("Music + Radio!");
+  display.display();
+  delay(2000);
   
-  int anim = (millis() / 200) % 2;
-  
-  display.drawLine(plugX, plugY, plugX, plugY + 2 + anim, SSD1306_WHITE);
-  display.drawLine(plugX + 3, plugY, plugX + 3, plugY + 2 + anim, SSD1306_WHITE);
-  
-  display.drawRect(plugX - 1, plugY + 2, 5, 4, SSD1306_WHITE);
-  display.drawLine(plugX + 1, plugY + 6, plugX + 1, plugY + 7, SSD1306_WHITE);
-  
-  if (anim == 1) {
-    display.drawPixel(plugX - 2, plugY + 4, SSD1306_WHITE);
-    display.drawPixel(plugX + 5, plugY + 3, SSD1306_WHITE);
+  Serial.println("\n--- Initializing DFPlayer ---");
+  musicPlayerAvailable = initMusicPlayer();
+  if (musicPlayerAvailable) {
+    showStatus("Music Ready!\n" + String(totalTracks) + " tracks", 1500);
+  } else {
+    showStatus("DFPlayer Failed\nCheck wiring", 1500);
   }
-}
-
-void drawWiFiSignalBars() {
-  int rssi = WiFi.RSSI();
-  int bars = 0;
   
-  if (rssi > -50) bars = 4;
-  else if (rssi > -60) bars = 3;
-  else if (rssi > -70) bars = 2;
-  else if (rssi > -80) bars = 1;
+  Serial.println("\n--- Initializing FM Radio ---");
+  radioAvailable = initFMRadio();
+  if (radioAvailable) {
+    showStatus("FM Radio Ready!", 1000);
+  } else {
+    showStatus("FM Radio Failed", 1000);
+  }
   
-  int x = 2;
-  int y = 2;
+  preferences.begin("app-config", true);
+  myNickname = preferences.getString("espnow_nick", "ESP32C3");
+  String savedSSID = preferences.getString("ssid", "");
+  String savedPassword = preferences.getString("password", "");
+  preferences.end();
+  Serial.println("✓ Preferences loaded");
   
-  for (int i = 0; i < 4; i++) {
-    int barHeight = (i + 1) * 2;
-    if (i < bars) {
-      display.fillRect(x + i * 3, y + (8 - barHeight), 2, barHeight, SSD1306_WHITE);
+  if (savedSSID.length() > 0) {
+    Serial.print("Connecting to: ");
+    Serial.println(savedSSID);
+    WiFi.begin(savedSSID.c_str(), savedPassword.c_str());
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+      delay(500);
+      Serial.print(".");
+      attempts++;
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\n✓ WiFi Connected");
     } else {
-      display.drawRect(x + i * 3, y + (8 - barHeight), 2, barHeight, SSD1306_WHITE);
+      Serial.println("\n✗ WiFi Failed");
     }
   }
+  
+  currentState = STATE_MAIN_MENU;
+  menuSelection = 0;
+  showMainMenu();
+  
+  Serial.println("\n=== SETUP COMPLETE ===");
+  Serial.print("Battery: ");
+  Serial.print(batteryVoltage);
+  Serial.print("mV (");
+  Serial.print(batteryPercent);
+  Serial.println("%)");
+  Serial.print("DFPlayer: ");
+  Serial.println(musicPlayerAvailable ? "OK" : "FAIL");
+  Serial.print("FM Radio: ");
+  Serial.println(radioAvailable ? "OK" : "FAIL");
+  Serial.println("======================\n");
 }
 
-// ========== BUTTON HANDLERS ==========
-
-void handleUp() {
-  switch(currentState) {
-    case STATE_MAIN_MENU:
-      // Di icon menu, UP tidak digunakan (atau bisa ditambahkan fungsi lain)
-      break;
-    case STATE_WIFI_MENU:
-      menuSelection = (menuSelection - 1 + 3) % 3;
-      showWiFiMenu();
-      break;
-    case STATE_POWER_BASE:
-      powerMenuSelection = (powerMenuSelection - 1 + 5) % 5;
-      showPowerBase();
-      break;
-    case STATE_SETTINGS_MENU:
-      settingsMenuSelection = (settingsMenuSelection - 1 + 6) % 6;
-      showSettingsMenu();
-      break;
-    case STATE_DISPLAY_SETTINGS:
-      menuSelection = (menuSelection - 1 + 3) % 3;
-      showDisplaySettings();
-      break;
-    case STATE_API_SELECT:
-      menuSelection = (menuSelection - 1 + 2) % 2;
-      showAPISelect();
-      break;
-    case STATE_ESP_NOW_MENU:
-      menuSelection = (menuSelection - 1 + 4) % 4;
-      showESPNowMenu();
-      break;
-    case STATE_ESP_NOW_SEND:
-      if (peerCount > 0) {
-        selectedPeer = (selectedPeer - 1 + peerCount) % peerCount;
-        showESPNowSend();
-      }
-      break;
-    case STATE_ESP_NOW_INBOX:
-      if (inboxCount > 0) {
-        menuSelection = (menuSelection - 1 + inboxCount) % inboxCount;
-        showESPNowInbox();
-      }
-      break;
-    case STATE_WIFI_SCAN:
-      if (networkCount > 0) {
-        selectedNetwork = (selectedNetwork - 1 + networkCount) % networkCount;
-        wifiPage = selectedNetwork / wifiPerPage;
-        displayWiFiNetworks();
-      }
-      break;
-    case STATE_KEYBOARD:
-    case STATE_PASSWORD_INPUT:
-      cursorY = (cursorY - 1 + 3) % 3;
-      drawKeyboard();
-      break;
-    case STATE_CALCULATOR:
-      cursorY = (cursorY - 1 + 4) % 4;
-      showCalculator();
-      break;
-    case STATE_CHAT_RESPONSE:
-      scrollOffset = max(0, scrollOffset - 8);
-      displayResponse();
-      break;
+// ============ LOOP ============
+void loop() {
+  unsigned long currentMillis = millis();
+  
+  updateBatteryStatus();
+  
+  if (currentState == STATE_LOADING) {
+    if (currentMillis - lastLoadingUpdate > 150) {
+      lastLoadingUpdate = currentMillis;
+      loadingFrame = (loadingFrame + 1) % 8;
+      showLoadingAnimation();
+    }
   }
-}
-
-void handleDown() {
-  switch(currentState) {
-    case STATE_MAIN_MENU:
-      // Di icon menu, DOWN tidak digunakan (atau bisa ditambahkan fungsi lain)
-      break;
-    case STATE_WIFI_MENU:
-      menuSelection = (menuSelection + 1) % 3;
-      showWiFiMenu();
-      break;
-    case STATE_POWER_BASE:
-      powerMenuSelection = (powerMenuSelection + 1) % 5;
-      showPowerBase();
-      break;
-    case STATE_SETTINGS_MENU:
-      settingsMenuSelection = (settingsMenuSelection + 1) % 6;
-      showSettingsMenu();
-      break;
-    case STATE_DISPLAY_SETTINGS:
-      menuSelection = (menuSelection + 1) % 3;
-      showDisplaySettings();
-      break;
-    case STATE_API_SELECT:
-      menuSelection = (menuSelection + 1) % 2;
-      showAPISelect();
-      break;
-    case STATE_ESP_NOW_MENU:
-      menuSelection = (menuSelection + 1) % 4;
-      showESPNowMenu();
-      break;
-    case STATE_ESP_NOW_SEND:
-      if (peerCount > 0) {
-        selectedPeer = (selectedPeer + 1) % peerCount;
-        showESPNowSend();
+  
+  if (currentMillis - lastDebounce > debounceDelay) {
+    bool buttonPressed = false;
+    
+    if (isSelectingMode) {
+      if (digitalRead(BTN_UP) == BTN_ACT) {
+        currentAIMode = MODE_SUBARU;
+        showAIModeSelection();
+        buttonPressed = true;
       }
-      break;
-    case STATE_ESP_NOW_INBOX:
-      if (inboxCount > 0) {
-        menuSelection = (menuSelection + 1) % inboxCount;
-        showESPNowInbox();
+      if (digitalRead(BTN_DOWN) == BTN_ACT) {
+        currentAIMode = MODE_STANDARD;
+        showAIModeSelection();
+        buttonPressed = true;
       }
-      break;
-    case STATE_WIFI_SCAN:
-      if (networkCount > 0) {
-        selectedNetwork = (selectedNetwork + 1) % networkCount;
-        wifiPage = selectedNetwork / wifiPerPage;
-        displayWiFiNetworks();
-      }
-      break;
-    case STATE_KEYBOARD:
-    case STATE_PASSWORD_INPUT:
-      cursorY = (cursorY + 1) % 3;
-      drawKeyboard();
-      break;
-    case STATE_CALCULATOR:
-      cursorY = (cursorY + 1) % 4;
-      showCalculator();
-      break;
-    case STATE_CHAT_RESPONSE:
-      scrollOffset += 8;
-      displayResponse();
-      break;
-  }
-}
-
-void handleLeft() {
-  switch(currentState) {
-    case STATE_MAIN_MENU:
-      // Navigate icon menu kiri
-      selectedIconIndex = max(0, selectedIconIndex - 1);
-      showMainMenu();
-      break;
-    case STATE_KEYBOARD:
-    case STATE_PASSWORD_INPUT:
-      cursorX = (cursorX - 1 + 10) % 10;
-      drawKeyboard();
-      break;
-    case STATE_CALCULATOR:
-      cursorX = (cursorX - 1 + 4) % 4;
-      showCalculator();
-      break;
-    case STATE_DISPLAY_SETTINGS:
-      if (menuSelection == 0) {
-        fontSize = max(1, fontSize - 1);
-        preferences.putInt("fontSize", fontSize);
-        showDisplaySettings();
-      } else if (menuSelection == 1) {
-        animSpeed = max(50, animSpeed - 50);
-        preferences.putInt("animSpeed", animSpeed);
-        showDisplaySettings();
-      }
-      break;
-  }
-}
-
-void handleRight() {
-  switch(currentState) {
-    case STATE_MAIN_MENU:
-      // Navigate icon menu kanan
-      selectedIconIndex = min(iconMenuCount - 1, selectedIconIndex + 1);
-      showMainMenu();
-      break;
-    case STATE_KEYBOARD:
-    case STATE_PASSWORD_INPUT:
-      cursorX = (cursorX + 1) % 10;
-      drawKeyboard();
-      break;
-    case STATE_CALCULATOR:
-      cursorX = (cursorX + 1) % 4;
-      showCalculator();
-      break;
-    case STATE_DISPLAY_SETTINGS:
-      if (menuSelection == 0) {
-        fontSize = min(2, fontSize + 1);
-        preferences.putInt("fontSize", fontSize);
-        showDisplaySettings();
-      } else if (menuSelection == 1) {
-        animSpeed = min(300, animSpeed + 50);
-        preferences.putInt("animSpeed", animSpeed);
-        showDisplaySettings();
-      }
-      break;
-  }
-}
-
-void handleSelect() {
-  switch(currentState) {
-    case STATE_MAIN_MENU:
-      handleMainMenuSelect();
-      break;
-    case STATE_WIFI_MENU:
-      handleWiFiMenuSelect();
-      break;
-    case STATE_POWER_BASE:
-      handlePowerBaseSelect();
-      break;
-    case STATE_POWER_VISUAL:
-    case STATE_POWER_STATS:
-    case STATE_POWER_GRAPH:
-    case STATE_POWER_CONSUMPTION:
-      currentState = STATE_POWER_BASE;
-      powerMenuSelection = 0;
-      showPowerBase();
-      break;
-    case STATE_SETTINGS_MENU:
-      handleSettingsMenuSelect();
-      break;
-    case STATE_DISPLAY_SETTINGS:
-      if (menuSelection == 2) { // Save & Back
-        ledSuccess();
-        showStatus("Settings saved!", 1000);
-        currentState = STATE_SETTINGS_MENU;
-        settingsMenuSelection = 0;
-        showSettingsMenu();
-      }
-      break;
-    case STATE_SYSTEM_INFO:
-    case STATE_DEVELOPER_MODE:
-    case STATE_BATTERY_GUARDIAN:
-      currentState = STATE_SETTINGS_MENU;
-      settingsMenuSelection = 0;
-      showSettingsMenu();
-      break;
-    case STATE_API_SELECT:
-      handleAPISelectSelect();
-      break;
-    case STATE_CALCULATOR:
-      handleCalculatorInput();
-      break;
-    case STATE_ESP_NOW_MENU:
-      switch(menuSelection) {
-        case 0: // Send Message
-          if (peerCount > 0) {
-            currentState = STATE_KEYBOARD;
-            userInput = "";
-            outgoingMessage = "";
-            cursorX = 0;
-            cursorY = 0;
-            drawKeyboard();
-          } else {
-            showStatus("No peers!\nAdd via Serial", 2000);
-            showESPNowMenu();
-          }
-          break;
-        case 1: // Inbox
-          currentState = STATE_ESP_NOW_INBOX;
-          menuSelection = 0;
-          showESPNowInbox();
-          break;
-        case 2: // Manage Peers
-          currentState = STATE_ESP_NOW_PEERS;
-          showESPNowPeers();
-          break;
-        case 3: // Back
-          currentState = STATE_MAIN_MENU;
-          menuSelection = 0;
-          showMainMenu();
-          break;
-      }
-      break;
-    case STATE_ESP_NOW_SEND:
-      if (peerCount > 0) {
-        currentState = STATE_KEYBOARD;
+      if (digitalRead(BTN_OK) == BTN_ACT) {
+        isSelectingMode = false;
         userInput = "";
+        keyboardContext = CONTEXT_CHAT;
         cursorX = 0;
         cursorY = 0;
         currentKeyboardMode = MODE_LOWER;
-        drawKeyboard();
+        changeState(STATE_KEYBOARD);
+        buttonPressed = true;
       }
-      break;
-    case STATE_ESP_NOW_INBOX:
-      if (inboxCount > 0) {
-        inbox[menuSelection].read = true;
-        showStatus(inbox[menuSelection].text, 3000);
-        showESPNowInbox();
+      if (digitalRead(BTN_BACK) == BTN_ACT) {
+        isSelectingMode = false;
+        menuSelection = 0;
+        changeState(STATE_MAIN_MENU);
+        buttonPressed = true;
       }
-      break;
-    case STATE_ESP_NOW_PEERS:
-      currentState = STATE_ESP_NOW_MENU;
-      menuSelection = 0;
-      showESPNowMenu();
-      break;
-    case STATE_WIFI_SCAN:
-      if (networkCount > 0) {
-        selectedSSID = networks[selectedNetwork].ssid;
-        if (networks[selectedNetwork].encrypted) {
-          passwordInput = "";
-          currentState = STATE_PASSWORD_INPUT;
+      
+      if (buttonPressed) {
+        lastDebounce = currentMillis;
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(30);
+        digitalWrite(LED_BUILTIN, LOW);
+      }
+      return;
+    }
+    
+    if (digitalRead(BTN_UP) == BTN_ACT) {
+      switch(currentState) {
+        case STATE_MAIN_MENU:
+          if (menuSelection > 0) menuSelection--;
+          break;
+        case STATE_WIFI_MENU:
+          if (menuSelection > 0) menuSelection--;
+          break;
+        case STATE_ESPNOW_MENU:
+          if (menuSelection > 0) menuSelection--;
+          break;
+        case STATE_ESPNOW_PEER_LIST:
+          if (selectedPeer > 0) selectedPeer--;
+          break;
+        case STATE_WIFI_SCAN:
+          if (selectedNetwork > 0) {
+            selectedNetwork--;
+            if (selectedNetwork < wifiPage * wifiPerPage) wifiPage--;
+          }
+          break;
+        case STATE_KEYBOARD:
+        case STATE_PASSWORD_INPUT:
+          cursorY--;
+          if (cursorY < 0) cursorY = 2;
+          break;
+        case STATE_CHAT_RESPONSE:
+          if (scrollOffset > 0) scrollOffset -= 10;
+          break;
+        case STATE_ESPNOW_CHAT:
+          if (espnowScrollOffset > 0) espnowScrollOffset -= 10;
+          break;
+        case STATE_MUSIC_PLAYER:
+          if (musicPlayerAvailable) {
+            changeVolume(1);
+          }
+          break;
+        case STATE_MUSIC_PLAYLIST:
+          if (playlistSelection > 0) playlistSelection--;
+          break;
+        case STATE_MUSIC_MENU:
+          if (menuSelection > 0) menuSelection--;
+          break;
+        case STATE_MUSIC_EQUALIZER:
+          if (currentEQ > 0) {
+            currentEQ--;
+            applyEqualizer();
+          }
+          break;
+        case STATE_FM_RADIO:
+          if (radioAvailable) {
+            fmVolume++;
+            if (fmVolume > 15) fmVolume = 15;
+            radio.setVolume(fmVolume);
+          }
+          break;
+        case STATE_FM_MENU:
+          if (menuSelection > 0) menuSelection--;
+          break;
+        case STATE_FM_PRESET:
+          if (selectedPreset > 0) selectedPreset--;
+          break;
+        default: break;
+      }
+      buttonPressed = true;
+    }
+    
+    if (digitalRead(BTN_DOWN) == BTN_ACT) {
+      switch(currentState) {
+        case STATE_MAIN_MENU:
+          if (menuSelection < 5) menuSelection++;
+          break;
+        case STATE_WIFI_MENU:
+          if (menuSelection < 2) menuSelection++;
+          break;
+        case STATE_ESPNOW_MENU:
+          if (menuSelection < 3) menuSelection++;
+          break;
+        case STATE_ESPNOW_PEER_LIST:
+          if (selectedPeer < espnowPeerCount - 1) selectedPeer++;
+          break;
+        case STATE_WIFI_SCAN:
+          if (selectedNetwork < networkCount - 1) {
+            selectedNetwork++;
+            if (selectedNetwork >= (wifiPage + 1) * wifiPerPage) wifiPage++;
+          }
+          break;
+        case STATE_KEYBOARD:
+        case STATE_PASSWORD_INPUT:
+          cursorY++;
+          if (cursorY > 2) cursorY = 0;
+          break;
+        case STATE_CHAT_RESPONSE:
+          scrollOffset += 10;
+          break;
+        case STATE_ESPNOW_CHAT:
+          espnowScrollOffset += 10;
+          break;
+        case STATE_MUSIC_PLAYER:
+          if (musicPlayerAvailable) {
+            changeVolume(-1);
+          }
+          break;
+        case STATE_MUSIC_PLAYLIST:
+          if (playlistSelection < totalTracks - 1) playlistSelection++;
+          break;
+        case STATE_MUSIC_MENU:
+          if (menuSelection < 4) menuSelection++;
+          break;
+        case STATE_MUSIC_EQUALIZER:
+          if (currentEQ < 5) {
+            currentEQ++;
+            applyEqualizer();
+          }
+          break;
+        case STATE_FM_RADIO:
+          if (radioAvailable) {
+            fmVolume--;
+            if (fmVolume < 0) fmVolume = 0;
+            radio.setVolume(fmVolume);
+          }
+          break;
+        case STATE_FM_MENU:
+          if (menuSelection < 2) menuSelection++;
+          break;
+        case STATE_FM_PRESET:
+          if (selectedPreset < fmPresetCount - 1) selectedPreset++;
+          break;
+        default: break;
+      }
+      buttonPressed = true;
+    }
+    
+    if (digitalRead(BTN_LEFT) == BTN_ACT) {
+      switch(currentState) {
+        case STATE_KEYBOARD:
+        case STATE_PASSWORD_INPUT:
+          cursorX--;
+          if (cursorX < 0) cursorX = 9;
+          break;
+        case STATE_ESPNOW_CHAT:
+          espnowBroadcastMode = !espnowBroadcastMode;
+          showStatus(espnowBroadcastMode ? "Broadcast" : "Direct", 500);
+          break;
+        case STATE_MUSIC_PLAYER:
+          if (musicPlayerAvailable && totalTracks > 0) {
+            previousTrack();
+          }
+          break;
+        case STATE_FM_RADIO:
+          if (radioAvailable) seekDown();
+          break;
+        default: break;
+      }
+      buttonPressed = true;
+    }
+    
+    if (digitalRead(BTN_RIGHT) == BTN_ACT) {
+      switch(currentState) {
+        case STATE_KEYBOARD:
+        case STATE_PASSWORD_INPUT:
+          cursorX++;
+          if (cursorX > 9) cursorX = 0;
+          break;
+        case STATE_ESPNOW_CHAT:
+          espnowBroadcastMode = !espnowBroadcastMode;
+          showStatus(espnowBroadcastMode ? "Broadcast" : "Direct", 500);
+          break;
+        case STATE_MUSIC_PLAYER:
+          if (musicPlayerAvailable && totalTracks > 0) {
+            nextTrack();
+          }
+          break;
+        case STATE_FM_RADIO:
+          if (radioAvailable) seekUp();
+          break;
+        default: break;
+      }
+      buttonPressed = true;
+    }
+    
+    if (digitalRead(BTN_OK) == BTN_ACT) {
+      switch(currentState) {
+        case STATE_MAIN_MENU:
+          handleMainMenuSelect();
+          break;
+        case STATE_WIFI_MENU:
+          handleWiFiMenuSelect();
+          break;
+        case STATE_ESPNOW_MENU:
+          handleESPNowMenuSelect();
+          break;
+        case STATE_WIFI_SCAN:
+          if (networkCount > 0) {
+            selectedSSID = networks[selectedNetwork].ssid;
+            if (networks[selectedNetwork].encrypted) {
+              passwordInput = "";
+              keyboardContext = CONTEXT_WIFI_PASSWORD;
+              cursorX = 0;
+              cursorY = 0;
+              changeState(STATE_PASSWORD_INPUT);
+            } else {
+              connectToWiFi(selectedSSID, "");
+            }
+          }
+          break;
+        case STATE_ESPNOW_CHAT:
+          userInput = "";
+          keyboardContext = CONTEXT_ESPNOW_CHAT;
           cursorX = 0;
           cursorY = 0;
           currentKeyboardMode = MODE_LOWER;
-          drawKeyboard();
-        } else {
-          connectToWiFi(selectedSSID, "");
-        }
-      }
-      break;
-    case STATE_KEYBOARD:
-      if (previousState == STATE_ESP_NOW_MENU || previousState == STATE_ESP_NOW_SEND) {
-        // ESP-NOW message mode
-        const char* key = getCurrentKey();
-        if (strcmp(key, "OK") == 0 && userInput.length() > 0) {
-          if (peerCount > 0) {
-            sendESPNowMessage(userInput, peerAddresses[selectedPeer]);
-            userInput = "";
-            currentState = STATE_ESP_NOW_MENU;
-            showESPNowMenu();
+          changeState(STATE_KEYBOARD);
+          break;
+        case STATE_ESPNOW_PEER_LIST:
+          if (espnowPeerCount > 0) {
+            espnowBroadcastMode = false;
+            showStatus("Direct mode!", 800);
+            changeState(STATE_ESPNOW_CHAT);
           }
-        } else {
+          break;
+        case STATE_KEYBOARD:
           handleKeyPress();
-        }
-      } else {
-        handleKeyPress();
+          break;
+        case STATE_PASSWORD_INPUT:
+          handlePasswordKeyPress();
+          break;
+        case STATE_SYSTEM_INFO:
+          chatHistory = "";
+          chatMessageCount = 0;
+          showStatus("Chat cleared!", 1000);
+          break;
+        case STATE_MUSIC_PLAYER:
+          if (musicPlayerAvailable && totalTracks > 0) {
+            menuSelection = 0;
+            changeState(STATE_MUSIC_MENU);
+          }
+          break;
+        case STATE_MUSIC_PLAYLIST:
+          playTrack(playlistSelection + 1);
+          changeState(STATE_MUSIC_PLAYER);
+          break;
+        case STATE_MUSIC_MENU:
+          handleMusicMenuSelect();
+          break;
+        case STATE_MUSIC_EQUALIZER:
+          changeState(STATE_MUSIC_MENU);
+          break;
+        case STATE_FM_RADIO:
+          if (radioAvailable) {
+            menuSelection = 0;
+            changeState(STATE_FM_MENU);
+          }
+          break;
+        case STATE_FM_MENU:
+          if (menuSelection == 0) {
+            saveFMPreset();
+            changeState(STATE_FM_RADIO);
+          } else if (menuSelection == 1) {
+            selectedPreset = 0;
+            changeState(STATE_FM_PRESET);
+          } else if (menuSelection == 2) {
+            changeState(STATE_FM_RADIO);
+          }
+          break;
+        case STATE_FM_PRESET:
+          if (fmPresetCount > 0) {
+            tuneFrequency(fmPresets[selectedPreset].frequency);
+            changeState(STATE_FM_RADIO);
+          }
+          break;
+        default: break;
       }
-      break;
-    case STATE_PASSWORD_INPUT:
-      handlePasswordKeyPress();
-      break;
-    case STATE_CHAT_RESPONSE:
-      currentState = STATE_MAIN_MENU;
-      userInput = "";
-      aiResponse = "";
-      scrollOffset = 0;
-      showMainMenu();
-      break;
+      buttonPressed = true;
+    }
+    
+    if (digitalRead(BTN_BACK) == BTN_ACT) {
+      switch(currentState) {
+        case STATE_PASSWORD_INPUT:
+          changeState(STATE_WIFI_SCAN);
+          break;
+        case STATE_WIFI_SCAN:
+          menuSelection = 0;
+          changeState(STATE_WIFI_MENU);
+          break;
+        case STATE_WIFI_MENU:
+        case STATE_SYSTEM_INFO:
+          menuSelection = 0;
+          changeState(STATE_MAIN_MENU);
+          break;
+        case STATE_ESPNOW_MENU:
+          menuSelection = 0;
+          changeState(STATE_MAIN_MENU);
+          break;
+        case STATE_ESPNOW_PEER_LIST:
+          changeState(STATE_ESPNOW_MENU);
+          break;
+        case STATE_ESPNOW_CHAT:
+          changeState(STATE_ESPNOW_MENU);
+          break;
+        case STATE_CHAT_RESPONSE:
+          changeState(STATE_KEYBOARD);
+          break;
+        case STATE_KEYBOARD:
+          if (keyboardContext == CONTEXT_CHAT) {
+            menuSelection = 0;
+            changeState(STATE_MAIN_MENU);
+          } else if (keyboardContext == CONTEXT_ESPNOW_CHAT) {
+            changeState(STATE_ESPNOW_CHAT);
+          } else if (keyboardContext == CONTEXT_ESPNOW_NICKNAME) {
+            changeState(STATE_ESPNOW_MENU);
+          } else {
+            changeState(STATE_WIFI_SCAN);
+          }
+          break;
+        case STATE_MUSIC_PLAYER:
+          if (musicPlayerAvailable && totalTracks > 0) {
+            togglePlayPause();
+          } else {
+            menuSelection = 0;
+            changeState(STATE_MAIN_MENU);
+          }
+          break;
+        case STATE_MUSIC_PLAYLIST:
+          changeState(STATE_MUSIC_MENU);
+          break;
+        case STATE_MUSIC_MENU:
+          changeState(STATE_MUSIC_PLAYER);
+          break;
+        case STATE_MUSIC_EQUALIZER:
+          changeState(STATE_MUSIC_MENU);
+          break;
+        case STATE_FM_RADIO:
+          menuSelection = 0;
+          changeState(STATE_MAIN_MENU);
+          break;
+        case STATE_FM_MENU:
+          changeState(STATE_FM_RADIO);
+          break;
+        case STATE_FM_PRESET:
+          changeState(STATE_FM_MENU);
+          break;
+        default:
+          menuSelection = 0;
+          changeState(STATE_MAIN_MENU);
+          break;
+      }
+      buttonPressed = true;
+    }
+    
+    if (buttonPressed) {
+      lastDebounce = currentMillis;
+      digitalWrite(LED_BUILTIN, HIGH);
+      delay(30);
+      digitalWrite(LED_BUILTIN, LOW);
+      refreshCurrentScreen();
+    }
   }
 }
