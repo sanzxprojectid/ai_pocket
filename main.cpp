@@ -2832,6 +2832,11 @@ void loop() {
           changeState(STATE_TRIVIA_MODE);
           break;
         case STATE_TRIVIA_MODE:
+          // Stop any background music before starting quiz
+          if (musicPlayerAvailable) {
+            dfPlayer.stop();
+            isPlaying = false;
+          }
           // Initialize game
           triviaCurrentQuestion = 0;
           triviaTotalQuestions = triviaModeQuestions[selectedTriviaMode];
