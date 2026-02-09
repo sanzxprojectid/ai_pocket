@@ -746,22 +746,20 @@ void drawTriviaMode() {
 void drawTriviaPlaying() {
   display.clearDisplay();
   
-  // Compact Header
+  // 1. Header (0-7)
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
   display.print("Q:"); display.print(triviaCurrentQuestion + 1);
   display.print("/"); display.print(triviaTotalQuestions);
-
   display.setCursor(50, 0);
   display.print("Sc:"); display.print(triviaScore);
-
   if (triviaStreak >= 3) {
-    display.setCursor(100, 0);
+    display.setCursor(105, 0);
     display.print("x"); display.print(triviaStreak);
   }
 
-  // Timer Bar
+  // 2. Timer Bar (8-10)
   unsigned long timeElapsed = millis() - triviaQuestionStartTime;
   unsigned long timeRemaining = (timeElapsed >= triviaTimeLimit) ? 0 : (triviaTimeLimit - timeElapsed);
   
@@ -770,58 +768,74 @@ void drawTriviaPlaying() {
     triviaWrongAnswers++;
     triviaStreak = 0;
     triviaCurrentQuestion++;
-    playSoundEffect(2); // Wrong sound
+    playSoundEffect(2);
     delay(1000);
     changeState(STATE_TRIVIA_RESULT);
     return;
   }
   
   int timerW = map(timeRemaining, 0, triviaTimeLimit, 0, SCREEN_WIDTH);
-  display.drawRect(0, 9, SCREEN_WIDTH, 3, SSD1306_WHITE);
-  display.fillRect(0, 9, timerW, 3, SSD1306_WHITE);
+  display.drawRect(0, 8, SCREEN_WIDTH, 3, SSD1306_WHITE);
+  display.fillRect(0, 8, timerW, 3, SSD1306_WHITE);
   
-  // Question (2 lines)
-  int y = 14;
-  int x = 0;
+  // 3. Question with Auto-Scroll (12-27)
   String question = currentQuestion.question;
-  String word = "";
-  for (unsigned int i = 0; i < question.length(); i++) {
-    char c = question.charAt(i);
-    if (c == ' ' || i == question.length() - 1) {
-      if (i == question.length() - 1 && c != ' ') word += c;
-      if (x + (int)word.length() * 6 > SCREEN_WIDTH) {
-        x = 0; y += 8;
+  static String lastQuestion = "";
+  static String lines[6];
+  static int lineCount = 0;
+
+  if (question != lastQuestion) {
+    lastQuestion = question;
+    lineCount = 0;
+    String word = "";
+    String currentLine = "";
+    for (unsigned int i = 0; i <= question.length(); i++) {
+      char c = (i < question.length()) ? question[i] : ' ';
+      if (c == ' ') {
+        if ((currentLine.length() + word.length()) * 6 > SCREEN_WIDTH - 2) {
+          if (lineCount < 6) lines[lineCount++] = currentLine;
+          currentLine = word + " ";
+        } else {
+          currentLine += word + " ";
+        }
+        word = "";
+      } else {
+        word += c;
       }
-      if (y < 30) {
-        display.setCursor(x, y);
-        display.print(word);
-        x += (word.length() + 1) * 6;
-      }
-      word = "";
-    } else {
-      word += c;
     }
+    if (currentLine.length() > 0 && lineCount < 6) lines[lineCount++] = currentLine;
   }
 
-  // Answers (Higher and clearer)
-  int answerStartY = 31;
-  int answerHeight = 8;
+  int scrollIdx = 0;
+  if (lineCount > 2) {
+    scrollIdx = (millis() / 2000) % lineCount;
+    // Keep it from jumping too much, show 2 lines
+    if (scrollIdx > lineCount - 2) scrollIdx = lineCount - 2;
+  }
+
+  for (int i = 0; i < 2 && (scrollIdx + i) < lineCount; i++) {
+    display.setCursor(0, 12 + (i * 8));
+    display.print(lines[scrollIdx + i]);
+  }
+
+  // 4. Answers - All 4 visible (28-63)
+  int answerStartY = 28;
+  int answerHeight = 9;
   for (int i = 0; i < currentQuestion.answerCount && i < 4; i++) {
     int ay = answerStartY + (i * answerHeight);
     if (i == triviaSelectedAnswer) {
-      display.fillRoundRect(0, ay - 1, SCREEN_WIDTH, answerHeight, 2, SSD1306_WHITE);
+      display.fillRect(0, ay, SCREEN_WIDTH, answerHeight - 1, SSD1306_WHITE);
       display.setTextColor(SSD1306_BLACK);
-      display.setCursor(2, ay);
-      display.print(">");
     } else {
       display.setTextColor(SSD1306_WHITE);
-      display.setCursor(2, ay);
-      display.print(" ");
     }
     
+    display.setCursor(2, ay + 1);
+    display.print(i == 0 ? "A:" : i == 1 ? "B:" : i == 2 ? "C:" : "D:");
+
     String ans = currentQuestion.answers[i];
-    if (ans.length() > 19) ans = ans.substring(0, 19);
-    display.setCursor(10, ay);
+    if (ans.length() > 17) ans = ans.substring(0, 17);
+    display.setCursor(18, ay + 1);
     display.print(ans);
   }
   
