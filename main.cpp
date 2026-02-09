@@ -515,16 +515,12 @@ void checkTriviaAnswer() {
       triviaMaxStreak = triviaStreak;
     }
     calculateTriviaScore(timeElapsed);
-    playSoundEffect(1); // Correct sound
   } else {
     triviaWrongAnswers++;
     triviaStreak = 0;
-    playSoundEffect(2); // Wrong sound
   }
   
   triviaCurrentQuestion++;
-  
-  delay(1500);
   changeState(STATE_TRIVIA_RESULT);
 }
 
@@ -768,8 +764,6 @@ void drawTriviaPlaying() {
     triviaWrongAnswers++;
     triviaStreak = 0;
     triviaCurrentQuestion++;
-    playSoundEffect(2);
-    delay(1000);
     changeState(STATE_TRIVIA_RESULT);
     return;
   }
@@ -852,19 +846,18 @@ void drawTriviaResult() {
                             triviaCurrentQuestion == triviaCorrectAnswers + triviaWrongAnswers);
   
   if (lastAnswerCorrect) {
-    display.setCursor(30, 15);
-    display.print("CORRECT!");
-    display.setCursor(35, 25);
-    display.print("Score +");
-    // Display score earned (estimate)
+    display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+    display.setCursor(40, 15);
+    display.print(" CORRECT ");
+    display.setTextColor(SSD1306_WHITE);
   } else {
-    display.setCursor(35, 15);
-    display.print("WRONG!");
-    display.setCursor(20, 25);
-    display.print("Correct: ");
+    display.setCursor(45, 15);
+    display.print("WRONG");
+    display.setCursor(5, 28);
+    display.print("Correct:");
     String correct = currentQuestion.correctAnswer;
-    if (correct.length() > 10) correct = correct.substring(0, 10);
-    display.setCursor(15, 33);
+    if (correct.length() > 20) correct = correct.substring(0, 17) + "...";
+    display.setCursor(5, 38);
     display.print(correct);
   }
   
@@ -876,21 +869,10 @@ void drawTriviaResult() {
   display.print("Streak: ");
   display.print(triviaStreak);
   
+  display.setCursor(85, 55);
+  display.print("Next >");
+  
   display.display();
-  
-  delay(2000);
-  
-  // Check if game is over
-  if (triviaCurrentQuestion >= triviaTotalQuestions) {
-    saveTriviaScore();
-    changeState(STATE_TRIVIA_GAMEOVER);
-  } else if (selectedTriviaMode == 3 && triviaStreak == 0 && triviaWrongAnswers > 0) {
-    // Endless mode - game over on first wrong answer
-    saveTriviaScore();
-    changeState(STATE_TRIVIA_GAMEOVER);
-  } else {
-    fetchTriviaQuestion();
-  }
 }
 
 void drawTriviaGameOver() {
@@ -2746,6 +2728,17 @@ void loop() {
         case STATE_MUSIC_PLAYER:
           if (musicPlayerAvailable && totalTracks > 0) {
             nextTrack();
+          }
+          break;
+        case STATE_TRIVIA_RESULT:
+          if (triviaCurrentQuestion >= triviaTotalQuestions) {
+            saveTriviaScore();
+            changeState(STATE_TRIVIA_GAMEOVER);
+          } else if (selectedTriviaMode == 3 && triviaStreak == 0 && triviaWrongAnswers > 0) {
+            saveTriviaScore();
+            changeState(STATE_TRIVIA_GAMEOVER);
+          } else {
+            fetchTriviaQuestion();
           }
           break;
         default: break;
