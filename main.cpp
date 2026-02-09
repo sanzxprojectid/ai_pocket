@@ -8,7 +8,6 @@
 #include <Preferences.h>
 #include <esp_now.h>
 #include <DFRobotDFPlayerMini.h>
-#include <RDA5807.h>
 #include "secrets.h"
 
 // ============ OLED CONFIG ============
@@ -54,10 +53,6 @@ DFRobotDFPlayerMini dfPlayer;
 // ============ LED ============
 #define LED_BUILTIN 8
 
-// ============ FM RADIO ============
-RDA5807 radio;
-bool radioAvailable = false;
-
 // ============ APP STATE ============
 enum AppState {
   STATE_BOOT,
@@ -76,31 +71,46 @@ enum AppState {
   STATE_MUSIC_PLAYLIST,
   STATE_MUSIC_MENU,
   STATE_MUSIC_EQUALIZER,
-  STATE_FM_RADIO,
-  STATE_FM_SCAN,
-  STATE_FM_PRESET,
-  STATE_FM_MENU
+  STATE_TRIVIA_CATEGORIES,
+  STATE_TRIVIA_PLAYING,
+  STATE_TRIVIA_RESULT
 };
 
 AppState currentState = STATE_BOOT;
 
-// ============ FM RADIO VARIABLES ============
-#define MAX_FM_PRESETS 10
-struct FMPreset {
-  uint16_t frequency;
+// ============ TRIVIA VARIABLES ============
+struct TriviaCategory {
+  int id;
   String name;
-  bool active;
 };
 
-FMPreset fmPresets[MAX_FM_PRESETS];
-int fmPresetCount = 0;
-int selectedPreset = 0;
-uint16_t currentFrequency = 10230;
-int fmVolume = 8;
-bool fmMuted = false;
-bool fmStereo = true;
-unsigned long lastFreqChange = 0;
-int fmRSSI = 0;
+const TriviaCategory triviaCategories[] = {
+  {0, "Random"},
+  {9, "General Knowledge"},
+  {11, "Film"},
+  {12, "Music"},
+  {14, "Television"},
+  {15, "Video Games"},
+  {17, "Science & Nature"},
+  {18, "Computers"},
+  {21, "Sports"},
+  {22, "Geography"},
+  {23, "History"},
+  {24, "Politics"}
+};
+const int triviaCategoryCount = 12;
+
+int selectedTriviaCategory = 0;
+int triviaScore = 0;
+int triviaTimeLeft = 20;
+unsigned long lastTriviaTimeUpdate = 0;
+String triviaQuestion = "";
+String triviaOptions[4];
+int triviaCorrectOption = 0;
+int selectedTriviaOption = 0;
+String triviaDifficulty = "medium";
+bool triviaAnswered = false;
+bool lastAnswerCorrect = false;
 
 // ============ BATTERY VARIABLES ============
 int batteryPercent = 100;
@@ -274,14 +284,11 @@ void toggleRepeat();
 void applyEqualizer();
 int readBatteryVoltage();
 void updateBatteryStatus();
-bool initFMRadio();
-void drawFMRadio();
-void drawFMPreset();
-void drawFMMenu();
-void tuneFrequency(uint16_t freq);
-void seekUp();
-void seekDown();
-void saveFMPreset();
+void fetchTriviaQuestion();
+void drawTriviaCategories();
+void drawTriviaPlaying();
+void drawTriviaResult();
+String decodeHTML(String text);
 
 // ============ BATTERY FUNCTIONS ============
 int readBatteryVoltage() {
@@ -326,221 +333,237 @@ void drawBatteryIcon(int x, int y) {
   }
 }
 
-// ============ FM RADIO FUNCTIONS ============
-bool initFMRadio() {
-  radio.setup();
-  delay(100);
-  
-  radio.setFrequency(10230);
-  delay(100);
-  
-  uint16_t testFreq = radio.getFrequency();
-  if (testFreq == 0 || testFreq > 10800 || testFreq < 8700) {
-    Serial.println("✗ FM Radio Failed!");
-    return false;
-  }
-  
-  radio.setVolume(fmVolume);
-  radio.setMono(!fmStereo);
-  radio.setMute(false);
-  
-  preferences.begin("fm-radio", true);
-  fmPresetCount = preferences.getInt("preset_count", 0);
-  for (int i = 0; i < fmPresetCount && i < MAX_FM_PRESETS; i++) {
-    String key = "freq" + String(i);
-    fmPresets[i].frequency = preferences.getUInt(key.c_str(), 10230);
-    key = "name" + String(i);
-    fmPresets[i].name = preferences.getString(key.c_str(), "Station " + String(i + 1));
-    fmPresets[i].active = true;
-  }
-  preferences.end();
-  
-  if (fmPresetCount > 0) {
-    currentFrequency = fmPresets[0].frequency;
-  }
-  tuneFrequency(currentFrequency);
-  
-  Serial.println("✓ FM Radio Init");
-  return true;
+
+// ============ TRIVIA FUNCTIONS ============
+String decodeHTML(String text) {
+  text.replace("&quot;", "\"");
+  text.replace("&#039;", "'");
+  text.replace("&amp;", "&");
+  text.replace("&lt;", "<");
+  text.replace("&gt;", ">");
+  text.replace("&deg;", "°");
+  text.replace("&rsquo;", "'");
+  text.replace("&lsquo;", "'");
+  text.replace("&ldquo;", "\"");
+  text.replace("&rdquo;", "\"");
+  text.replace("&ndash;", "-");
+  text.replace("&mdash;", "-");
+  text.replace("&euml;", "ë");
+  text.replace("&eacute;", "é");
+  text.replace("&iacute;", "í");
+  text.replace("&oacute;", "ó");
+  text.replace("&uacute;", "ú");
+  text.replace("&ntilde;", "ñ");
+  return text;
 }
 
-void tuneFrequency(uint16_t freq) {
-  currentFrequency = freq;
-  radio.setFrequency(freq);
-  lastFreqChange = millis();
-  
-  delay(50);
-  fmRSSI = radio.getRssi();
-  
-  digitalWrite(LED_BUILTIN, HIGH);
-  delay(30);
-  digitalWrite(LED_BUILTIN, LOW);
-}
-
-void seekUp() {
-  if (millis() - lastFreqChange < 300) return;
-  
-  uint16_t newFreq = currentFrequency + 1;
-  if (newFreq > 10800) newFreq = 8700;
-  
-  tuneFrequency(newFreq);
-}
-
-void seekDown() {
-  if (millis() - lastFreqChange < 300) return;
-  
-  uint16_t newFreq = currentFrequency - 1;
-  if (newFreq < 8700) newFreq = 10800;
-  
-  tuneFrequency(newFreq);
-}
-
-void saveFMPreset() {
-  if (fmPresetCount >= MAX_FM_PRESETS) {
-    showStatus("Presets Full!", 1000);
+void fetchTriviaQuestion() {
+  if (WiFi.status() != WL_CONNECTED) {
+    showStatus("WiFi Disconnected!", 1500);
+    changeState(STATE_TRIVIA_CATEGORIES);
     return;
   }
-  
-  fmPresets[fmPresetCount].frequency = currentFrequency;
-  fmPresets[fmPresetCount].name = String(currentFrequency / 100) + "." + String(currentFrequency % 100);
-  fmPresets[fmPresetCount].active = true;
-  fmPresetCount++;
-  
-  preferences.begin("fm-radio", false);
-  preferences.putInt("preset_count", fmPresetCount);
-  for (int i = 0; i < fmPresetCount; i++) {
-    String key = "freq" + String(i);
-    preferences.putUInt(key.c_str(), fmPresets[i].frequency);
-    key = "name" + String(i);
-    preferences.putString(key.c_str(), fmPresets[i].name);
-  }
-  preferences.end();
-  
-  showStatus("Preset Saved!", 1000);
-}
 
-void drawFMRadio() {
-  display.clearDisplay();
-  drawStatusBar();
+  changeState(STATE_LOADING);
   
-  display.setTextSize(1);
-  display.setCursor(30, 12);
-  display.print("FM RADIO");
-  
-  if (!radioAvailable) {
-    display.setCursor(15, 30);
-    display.print("RDA5807M");
-    display.setCursor(15, 40);
-    display.print("Not Found!");
-    display.setCursor(5, 52);
-    display.print("Check connection");
-    display.display();
-    return;
+  HTTPClient http;
+  String url = "https://opentdb.com/api.php?amount=1&type=multiple";
+  if (triviaCategories[selectedTriviaCategory].id != 0) {
+    url += "&category=" + String(triviaCategories[selectedTriviaCategory].id);
   }
   
-  display.setTextSize(2);
-  String freqStr = String(currentFrequency / 100) + "." + String(currentFrequency % 100 / 10);
-  int freqW = freqStr.length() * 12;
-  display.setCursor((SCREEN_WIDTH - freqW) / 2, 24);
-  display.print(freqStr);
-  display.setTextSize(1);
-  display.setCursor((SCREEN_WIDTH - freqW) / 2 + freqW + 2, 28);
-  display.print("MHz");
+  http.begin(url);
+  int httpResponseCode = http.GET();
   
-  display.setCursor(0, 42);
-  display.print("Signal:");
-  int rssiBarX = 42;
-  int rssiBarY = 42;
-  int rssiBarW = 80;
-  int rssiBarH = 6;
-  
-  display.drawRect(rssiBarX, rssiBarY, rssiBarW, rssiBarH, SSD1306_WHITE);
-  int rssiFill = map(fmRSSI, 0, 63, 0, rssiBarW - 2);
-  if (rssiFill > 0) {
-    display.fillRect(rssiBarX + 1, rssiBarY + 1, rssiFill, rssiBarH - 2, SSD1306_WHITE);
-  }
-  
-  display.setCursor(0, 52);
-  if (fmMuted) {
-    display.print("MUTE");
-  } else {
-    display.print("Vol:");
-    display.print(fmVolume);
-  }
-  
-  display.setCursor(50, 52);
-  display.print(fmStereo ? "STEREO" : "MONO");
-  
-  display.display();
-}
+  if (httpResponseCode == 200) {
+    String payload = http.getString();
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
 
-void drawFMPreset() {
-  display.clearDisplay();
-  drawStatusBar();
-  
-  display.setTextSize(1);
-  display.setCursor(25, 12);
-  display.print("FM PRESETS");
-  
-  if (fmPresetCount == 0) {
-    display.setCursor(15, 35);
-    display.print("No presets");
-    display.setCursor(5, 50);
-    display.print("Save from Radio");
-  } else {
-    int startY = 22;
-    int itemHeight = 10;
-    
-    for (int i = 0; i < fmPresetCount && i < 4; i++) {
-      int y = startY + (i * itemHeight);
-      
-      if (i == selectedPreset) {
-        display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
-        display.setTextColor(SSD1306_BLACK);
-      } else {
-        display.setTextColor(SSD1306_WHITE);
+    if (!error && doc["response_code"] == 0) {
+      JsonObject result = doc["results"][0];
+      triviaQuestion = decodeHTML(result["question"].as<String>());
+
+      String correctAnswer = result["correct_answer"].as<String>();
+      triviaOptions[0] = decodeHTML(correctAnswer);
+      JsonArray incorrectAnswers = result["incorrect_answers"];
+      for (int i = 0; i < 3; i++) {
+        triviaOptions[i + 1] = decodeHTML(incorrectAnswers[i].as<String>());
       }
-      
-      display.setCursor(2, y + 1);
-      display.print(i + 1);
-      display.print(".");
-      
-      String freq = String(fmPresets[i].frequency / 100) + "." + String(fmPresets[i].frequency % 100 / 10);
-      display.setCursor(15, y + 1);
-      display.print(freq);
-      display.print(" MHz");
-      
-      display.setTextColor(SSD1306_WHITE);
+
+      // Shuffle options
+      for (int i = 3; i > 0; i--) {
+        int j = random(0, i + 1);
+        String temp = triviaOptions[i];
+        triviaOptions[i] = triviaOptions[j];
+        triviaOptions[j] = temp;
+      }
+
+      // Find new correct index
+      for (int i = 0; i < 4; i++) {
+        if (triviaOptions[i] == decodeHTML(correctAnswer)) {
+          triviaCorrectOption = i;
+          break;
+        }
+      }
+
+      triviaTimeLeft = 20;
+      lastTriviaTimeUpdate = millis();
+      selectedTriviaOption = 0;
+      triviaAnswered = false;
+      changeState(STATE_TRIVIA_PLAYING);
+    } else {
+      showStatus("API Error: " + String(doc["response_code"].as<int>()), 1500);
+      changeState(STATE_TRIVIA_CATEGORIES);
     }
+  } else {
+    showStatus("HTTP Error: " + String(httpResponseCode), 1500);
+    changeState(STATE_TRIVIA_CATEGORIES);
   }
-  
-  display.display();
+  http.end();
 }
 
-void drawFMMenu() {
+void drawTriviaCategories() {
   display.clearDisplay();
   drawStatusBar();
   
   display.setTextSize(1);
-  display.setCursor(30, 12);
-  display.print("FM MENU");
+  display.setCursor(20, 12);
+  display.print("SELECT CATEGORY");
   
-  const char* menuItems[] = {"Save Preset", "View Presets", "Back"};
-  int startY = 28;
-  int itemHeight = 12;
-  
-  for (int i = 0; i < 3; i++) {
+  int startY = 24;
+  int itemHeight = 10;
+  int maxVisible = 4;
+  int startIdx = selectedTriviaCategory - 1;
+  if (startIdx < 0) startIdx = 0;
+  if (startIdx + maxVisible > triviaCategoryCount) startIdx = triviaCategoryCount - maxVisible;
+
+  for (int i = 0; i < maxVisible; i++) {
+    int currentIdx = startIdx + i;
+    if (currentIdx >= triviaCategoryCount) break;
+
     int y = startY + (i * itemHeight);
-    if (i == menuSelection) {
-      display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+
+    if (currentIdx == selectedTriviaCategory) {
+      display.fillRect(0, y, SCREEN_WIDTH - 5, itemHeight, SSD1306_WHITE);
       display.setTextColor(SSD1306_BLACK);
     } else {
       display.setTextColor(SSD1306_WHITE);
     }
-    display.setCursor(10, y + 2);
-    display.print(menuItems[i]);
+
+    display.setCursor(5, y + 1);
+    display.print(triviaCategories[currentIdx].name);
     display.setTextColor(SSD1306_WHITE);
   }
+  
+  // Simple scroll indicator
+  display.drawRect(SCREEN_WIDTH - 3, startY, 2, maxVisible * itemHeight, SSD1306_WHITE);
+  int indicatorPos = map(selectedTriviaCategory, 0, triviaCategoryCount - 1, 0, (maxVisible * itemHeight) - 4);
+  display.fillRect(SCREEN_WIDTH - 3, startY + indicatorPos, 2, 4, SSD1306_WHITE);
+  
+  display.display();
+}
+
+void checkTriviaAnswer() {
+  triviaAnswered = true;
+  if (selectedTriviaOption == triviaCorrectOption) {
+    triviaScore += 10;
+    lastAnswerCorrect = true;
+  } else {
+    lastAnswerCorrect = false;
+  }
+  changeState(STATE_TRIVIA_RESULT);
+}
+
+void drawTriviaPlaying() {
+  display.clearDisplay();
+  
+  // Header
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(2, 0);
+  display.print("Score:");
+  display.print(triviaScore);
+  
+  display.setCursor(SCREEN_WIDTH - 30, 0);
+  if (triviaTimeLeft < 10) display.print("0");
+  display.print(triviaTimeLeft);
+  display.print("s");
+  
+  display.drawFastHLine(0, 9, SCREEN_WIDTH, SSD1306_WHITE);
+  
+  // Timer bar
+  int barWidth = map(triviaTimeLeft, 0, 20, 0, SCREEN_WIDTH);
+  display.fillRect(0, 10, barWidth, 2, SSD1306_WHITE);
+  
+  // Question word wrap
+  int y = 15;
+  int start = 0;
+  int maxChars = 21;
+  while (start < triviaQuestion.length() && y < 35) {
+    String line = triviaQuestion.substring(start, start + maxChars);
+    int lastSpace = line.lastIndexOf(' ');
+    if (lastSpace != -1 && start + maxChars < triviaQuestion.length()) {
+      line = line.substring(0, lastSpace);
+      start += lastSpace + 1;
+    } else {
+      start += maxChars;
+    }
+    display.setCursor(2, y);
+    display.print(line);
+    y += 8;
+  }
+  
+  // Options
+  y = 36;
+  for (int i = 0; i < 4; i++) {
+    if (i == selectedTriviaOption) {
+      display.fillRect(0, y + (i * 7) - 1, SCREEN_WIDTH, 8, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+
+    display.setCursor(4, y + (i * 7));
+    display.print((char)('A' + i));
+    display.print(". ");
+
+    String opt = triviaOptions[i];
+    if (opt.length() > 18) opt = opt.substring(0, 17) + "..";
+    display.print(opt);
+    display.setTextColor(SSD1306_WHITE);
+  }
+  
+  display.display();
+}
+
+void drawTriviaResult() {
+  display.clearDisplay();
+  drawStatusBar();
+  
+  int centerX = SCREEN_WIDTH / 2;
+  
+  if (lastAnswerCorrect) {
+    display.setTextSize(2);
+    display.setCursor(centerX - 42, 15);
+    display.print("CORRECT!");
+    display.drawRect(centerX - 45, 12, 90, 20, SSD1306_WHITE);
+  } else {
+    display.setTextSize(2);
+    display.setCursor(centerX - 36, 15);
+    display.print(triviaTimeLeft <= 0 ? "TIMEOUT" : "WRONG!");
+  }
+  
+  display.setTextSize(1);
+  display.setCursor(centerX - 30, 40);
+  display.print("Score: ");
+  display.print(triviaScore);
+  
+  display.setCursor(2, 55);
+  display.print("Ans: ");
+  String correct = triviaOptions[triviaCorrectOption];
+  if (correct.length() > 16) correct = correct.substring(0, 15) + "..";
+  display.print(correct);
   
   display.display();
 }
@@ -1143,7 +1166,7 @@ void showMainMenu() {
   display.setCursor(30, 12);
   display.print("MAIN MENU");
   
-  const char* items[] = {"AI CHAT", "WIFI", "ESP-NOW", "MUSIC", "FM RADIO", "SYSTEM"};
+  const char* items[] = {"AI CHAT", "WIFI", "ESP-NOW", "MUSIC", "TRIVIA", "SYSTEM"};
   int itemCount = 6;
   
   int startY = 20;
@@ -1161,10 +1184,6 @@ void showMainMenu() {
     display.print(items[i]);
     
     if (i == 3 && !musicPlayerAvailable) {
-      display.setCursor(SCREEN_WIDTH - 10, y);
-      display.print("X");
-    }
-    if (i == 4 && !radioAvailable) {
       display.setCursor(SCREEN_WIDTH - 10, y);
       display.print("X");
     }
@@ -1795,8 +1814,8 @@ void handleMainMenuSelect() {
     // MUSIC
     changeState(STATE_MUSIC_PLAYER);
   } else if (menuSelection == 4) {
-    // FM RADIO
-    changeState(STATE_FM_RADIO);
+    // TRIVIA
+    changeState(STATE_TRIVIA_CATEGORIES);
   } else if (menuSelection == 5) {
     // SYSTEM
     changeState(STATE_SYSTEM_INFO);
@@ -1970,14 +1989,14 @@ void refreshCurrentScreen() {
     case STATE_MUSIC_EQUALIZER:
       drawMusicEqualizer();
       break;
-    case STATE_FM_RADIO:
-      drawFMRadio();
+    case STATE_TRIVIA_CATEGORIES:
+      drawTriviaCategories();
       break;
-    case STATE_FM_MENU:
-      drawFMMenu();
+    case STATE_TRIVIA_PLAYING:
+      drawTriviaPlaying();
       break;
-    case STATE_FM_PRESET:
-      drawFMPreset();
+    case STATE_TRIVIA_RESULT:
+      drawTriviaResult();
       break;
     default:
       showMainMenu();
@@ -2042,14 +2061,6 @@ void setup() {
     showStatus("DFPlayer Failed\nCheck wiring", 1500);
   }
   
-  Serial.println("\n--- Initializing FM Radio ---");
-  radioAvailable = initFMRadio();
-  if (radioAvailable) {
-    showStatus("FM Radio Ready!", 1000);
-  } else {
-    showStatus("FM Radio Failed", 1000);
-  }
-  
   preferences.begin("app-config", true);
   myNickname = preferences.getString("espnow_nick", "ESP32C3");
   String savedSSID = preferences.getString("ssid", "");
@@ -2086,8 +2097,6 @@ void setup() {
   Serial.println("%)");
   Serial.print("DFPlayer: ");
   Serial.println(musicPlayerAvailable ? "OK" : "FAIL");
-  Serial.print("FM Radio: ");
-  Serial.println(radioAvailable ? "OK" : "FAIL");
   Serial.println("======================\n");
 }
 
@@ -2102,6 +2111,18 @@ void loop() {
       lastLoadingUpdate = currentMillis;
       loadingFrame = (loadingFrame + 1) % 8;
       showLoadingAnimation();
+    }
+  }
+
+  if (currentState == STATE_TRIVIA_PLAYING && !triviaAnswered) {
+    if (currentMillis - lastTriviaTimeUpdate > 1000) {
+      lastTriviaTimeUpdate = currentMillis;
+      triviaTimeLeft--;
+      if (triviaTimeLeft <= 0) {
+        triviaTimeLeft = 0;
+        checkTriviaAnswer();
+      }
+      refreshCurrentScreen();
     }
   }
   
@@ -2193,18 +2214,11 @@ void loop() {
             applyEqualizer();
           }
           break;
-        case STATE_FM_RADIO:
-          if (radioAvailable) {
-            fmVolume++;
-            if (fmVolume > 15) fmVolume = 15;
-            radio.setVolume(fmVolume);
-          }
+        case STATE_TRIVIA_CATEGORIES:
+          if (selectedTriviaCategory > 0) selectedTriviaCategory--;
           break;
-        case STATE_FM_MENU:
-          if (menuSelection > 0) menuSelection--;
-          break;
-        case STATE_FM_PRESET:
-          if (selectedPreset > 0) selectedPreset--;
+        case STATE_TRIVIA_PLAYING:
+          if (selectedTriviaOption > 0) selectedTriviaOption--;
           break;
         default: break;
       }
@@ -2259,18 +2273,11 @@ void loop() {
             applyEqualizer();
           }
           break;
-        case STATE_FM_RADIO:
-          if (radioAvailable) {
-            fmVolume--;
-            if (fmVolume < 0) fmVolume = 0;
-            radio.setVolume(fmVolume);
-          }
+        case STATE_TRIVIA_CATEGORIES:
+          if (selectedTriviaCategory < triviaCategoryCount - 1) selectedTriviaCategory++;
           break;
-        case STATE_FM_MENU:
-          if (menuSelection < 2) menuSelection++;
-          break;
-        case STATE_FM_PRESET:
-          if (selectedPreset < fmPresetCount - 1) selectedPreset++;
+        case STATE_TRIVIA_PLAYING:
+          if (selectedTriviaOption < 3) selectedTriviaOption++;
           break;
         default: break;
       }
@@ -2293,9 +2300,6 @@ void loop() {
             previousTrack();
           }
           break;
-        case STATE_FM_RADIO:
-          if (radioAvailable) seekDown();
-          break;
         default: break;
       }
       buttonPressed = true;
@@ -2316,9 +2320,6 @@ void loop() {
           if (musicPlayerAvailable && totalTracks > 0) {
             nextTrack();
           }
-          break;
-        case STATE_FM_RADIO:
-          if (radioAvailable) seekUp();
           break;
         default: break;
       }
@@ -2392,28 +2393,15 @@ void loop() {
         case STATE_MUSIC_EQUALIZER:
           changeState(STATE_MUSIC_MENU);
           break;
-        case STATE_FM_RADIO:
-          if (radioAvailable) {
-            menuSelection = 0;
-            changeState(STATE_FM_MENU);
-          }
+        case STATE_TRIVIA_CATEGORIES:
+          triviaScore = 0;
+          fetchTriviaQuestion();
           break;
-        case STATE_FM_MENU:
-          if (menuSelection == 0) {
-            saveFMPreset();
-            changeState(STATE_FM_RADIO);
-          } else if (menuSelection == 1) {
-            selectedPreset = 0;
-            changeState(STATE_FM_PRESET);
-          } else if (menuSelection == 2) {
-            changeState(STATE_FM_RADIO);
-          }
+        case STATE_TRIVIA_PLAYING:
+          checkTriviaAnswer();
           break;
-        case STATE_FM_PRESET:
-          if (fmPresetCount > 0) {
-            tuneFrequency(fmPresets[selectedPreset].frequency);
-            changeState(STATE_FM_RADIO);
-          }
+        case STATE_TRIVIA_RESULT:
+          fetchTriviaQuestion();
           break;
         default: break;
       }
@@ -2476,15 +2464,14 @@ void loop() {
         case STATE_MUSIC_EQUALIZER:
           changeState(STATE_MUSIC_MENU);
           break;
-        case STATE_FM_RADIO:
+        case STATE_TRIVIA_CATEGORIES:
           menuSelection = 0;
           changeState(STATE_MAIN_MENU);
           break;
-        case STATE_FM_MENU:
-          changeState(STATE_FM_RADIO);
-          break;
-        case STATE_FM_PRESET:
-          changeState(STATE_FM_MENU);
+        case STATE_TRIVIA_PLAYING:
+        case STATE_TRIVIA_RESULT:
+          menuSelection = 4;
+          changeState(STATE_TRIVIA_CATEGORIES);
           break;
         default:
           menuSelection = 0;
