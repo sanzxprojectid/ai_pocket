@@ -131,10 +131,18 @@ TriviaCategory triviaCategories[] = {
   {12, "Music"},
   {11, "Film"},
   {20, "Mythology"},
+  {10, "Books"},
+  {13, "Television"},
+  {14, "Video Games"},
+  {15, "Board Games"},
+  {16, "Gadgets"},
+  {29, "Comics"},
+  {31, "Anime & Manga"},
+  {32, "Cartoon"},
   {0, "Random"}
 };
 
-int triviaCategoryCount = 16;
+int triviaCategoryCount = 24;
 int selectedTriviaCategory = 0;
 int selectedTriviaDifficulty = 0; // 0=Easy, 1=Medium, 2=Hard
 int selectedTriviaMode = 0; // 0=Quick(5), 1=Classic(10), 2=Marathon(20), 3=Endless
@@ -772,49 +780,24 @@ void drawTriviaPlaying() {
   display.drawRect(0, 8, SCREEN_WIDTH, 3, SSD1306_WHITE);
   display.fillRect(0, 8, timerW, 3, SSD1306_WHITE);
   
-  // 3. Question with Auto-Scroll (12-27)
+  // 3. Question with Horizontal Scroll (12-20)
+  display.setCursor(0, 12);
   String question = currentQuestion.question;
-  static String lastQuestion = "";
-  static String lines[6];
-  static int lineCount = 0;
+  int textWidth = question.length() * 6;
 
-  if (question != lastQuestion) {
-    lastQuestion = question;
-    lineCount = 0;
-    String word = "";
-    String currentLine = "";
-    for (unsigned int i = 0; i <= question.length(); i++) {
-      char c = (i < question.length()) ? question[i] : ' ';
-      if (c == ' ') {
-        if ((currentLine.length() + word.length()) * 6 > SCREEN_WIDTH - 2) {
-          if (lineCount < 6) lines[lineCount++] = currentLine;
-          currentLine = word + " ";
-        } else {
-          currentLine += word + " ";
-        }
-        word = "";
-      } else {
-        word += c;
-      }
-    }
-    if (currentLine.length() > 0 && lineCount < 6) lines[lineCount++] = currentLine;
+  if (textWidth > SCREEN_WIDTH) {
+    int scrollRange = textWidth - SCREEN_WIDTH + 20;
+    int scrollOffset = (millis() / 50) % scrollRange;
+    display.setCursor(-scrollOffset, 12);
+    display.print(question);
+  } else {
+    display.setCursor((SCREEN_WIDTH - textWidth) / 2, 12);
+    display.print(question);
   }
 
-  int scrollIdx = 0;
-  if (lineCount > 2) {
-    scrollIdx = (millis() / 2000) % lineCount;
-    // Keep it from jumping too much, show 2 lines
-    if (scrollIdx > lineCount - 2) scrollIdx = lineCount - 2;
-  }
-
-  for (int i = 0; i < 2 && (scrollIdx + i) < lineCount; i++) {
-    display.setCursor(0, 12 + (i * 8));
-    display.print(lines[scrollIdx + i]);
-  }
-
-  // 4. Answers - All 4 visible (28-63)
-  int answerStartY = 28;
-  int answerHeight = 9;
+  // 4. Answers - All 4 visible (22-63)
+  int answerStartY = 24;
+  int answerHeight = 10;
   for (int i = 0; i < currentQuestion.answerCount && i < 4; i++) {
     int ay = answerStartY + (i * answerHeight);
     if (i == triviaSelectedAnswer) {
@@ -1083,16 +1066,16 @@ void applyEqualizer() {
 }
 
 void updateSpectrum() {
-  if (millis() - lastSpectrumUpdate < 100) return;
+  if (millis() - lastSpectrumUpdate < 50) return;
   lastSpectrumUpdate = millis();
   
   if (isPlaying) {
     for (int i = 0; i < 8; i++) {
-      int target = random(3, 20);
+      int target = random(2, 20);
       if (spectrumBars[i] < target) {
-        spectrumBars[i] += 2;
+        spectrumBars[i] += 3;
       } else {
-        spectrumBars[i] -= 1;
+        spectrumBars[i] -= 2;
       }
       spectrumBars[i] = constrain(spectrumBars[i], 0, 20);
     }
@@ -2511,8 +2494,16 @@ void loop() {
   
   if (currentState == STATE_TRIVIA_PLAYING) {
     static unsigned long lastTriviaUpdate = 0;
-    if (millis() - lastTriviaUpdate > 150) {
+    if (millis() - lastTriviaUpdate > 50) {
       lastTriviaUpdate = millis();
+      refreshCurrentScreen();
+    }
+  }
+
+  if (currentState == STATE_MUSIC_PLAYER) {
+    static unsigned long lastMusicUpdate = 0;
+    if (millis() - lastMusicUpdate > 50) {
+      lastMusicUpdate = millis();
       refreshCurrentScreen();
     }
   }
