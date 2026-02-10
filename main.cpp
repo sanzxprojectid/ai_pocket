@@ -781,21 +781,26 @@ void drawTriviaPlaying() {
   display.fillRect(0, 8, timerW, 3, SSD1306_WHITE);
   
   // 3. Question with Horizontal Scroll (12-20)
-  display.setCursor(0, 12);
+  display.setTextWrap(false);
   String question = currentQuestion.question;
   int textWidth = question.length() * 6;
+  int scrollGap = 40;
 
   if (textWidth > SCREEN_WIDTH) {
-    int scrollRange = textWidth - SCREEN_WIDTH + 20;
-    int scrollOffset = (millis() / 50) % scrollRange;
+    int scrollOffset = (millis() / 40) % (textWidth + scrollGap);
     display.setCursor(-scrollOffset, 12);
+    display.print(question);
+    display.setCursor(textWidth + scrollGap - scrollOffset, 12);
     display.print(question);
   } else {
     display.setCursor((SCREEN_WIDTH - textWidth) / 2, 12);
     display.print(question);
   }
+  display.setTextWrap(true);
 
-  // 4. Answers - All 4 visible (22-63)
+  display.drawFastHLine(0, 22, SCREEN_WIDTH, SSD1306_WHITE);
+
+  // 4. Answers - All 4 visible (24-63)
   int answerStartY = 24;
   int answerHeight = 10;
   for (int i = 0; i < currentQuestion.answerCount && i < 4; i++) {
