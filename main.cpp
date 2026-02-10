@@ -163,6 +163,7 @@ unsigned long triviaQuestionStartTime = 0;
 unsigned long triviaTimeLimit = 30000; // milliseconds
 int triviaSelectedAnswer = 0;
 bool triviaAnswered = false;
+bool lastResultCorrect = false;
 
 // Timer settings per difficulty
 int triviaTimeLimits[] = {30, 20, 15}; // Easy, Medium, Hard in seconds
@@ -501,9 +502,9 @@ void checkTriviaAnswer() {
   unsigned long timeElapsed = millis() - triviaQuestionStartTime;
   
   String selectedAnswerText = currentQuestion.answers[triviaSelectedAnswer];
-  bool isCorrect = (selectedAnswerText == currentQuestion.correctAnswer);
+  lastResultCorrect = (selectedAnswerText == currentQuestion.correctAnswer);
   
-  if (isCorrect) {
+  if (lastResultCorrect) {
     triviaCorrectAnswers++;
     triviaStreak++;
     if (triviaStreak > triviaMaxStreak) {
@@ -756,6 +757,7 @@ void drawTriviaPlaying() {
   
   if (timeRemaining == 0 && !triviaAnswered) {
     triviaAnswered = true;
+    lastResultCorrect = false;
     triviaWrongAnswers++;
     triviaStreak = 0;
     triviaCurrentQuestion++;
@@ -817,17 +819,17 @@ void drawTriviaResult() {
   
   display.setTextSize(1);
   
-  bool lastAnswerCorrect = (triviaCorrectAnswers > 0 && 
-                            triviaCurrentQuestion == triviaCorrectAnswers + triviaWrongAnswers);
-  
-  if (lastAnswerCorrect) {
+  if (lastResultCorrect) {
     display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-    display.setCursor(40, 15);
-    display.print(" CORRECT ");
+    display.setCursor(35, 15);
+    display.print("  CORRECT  ");
     display.setTextColor(SSD1306_WHITE);
   } else {
-    display.setCursor(45, 15);
-    display.print("WRONG");
+    display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+    display.setCursor(35, 15);
+    display.print("   WRONG   ");
+    display.setTextColor(SSD1306_WHITE);
+
     display.setCursor(5, 28);
     display.print("Correct:");
     String correct = currentQuestion.correctAnswer;
