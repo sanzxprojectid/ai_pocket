@@ -1220,11 +1220,11 @@ void drawMusicMenu() {
   display.setCursor(25, 12);
   display.print("MUSIC MENU");
   
-  const char* menuItems[] = {"Playlist", "Equalizer", "Shuffle", "Repeat", "Back"};
+  const char* menuItems[] = {"Play/Pause", "Playlist", "Equalizer", "Shuffle", "Repeat", "Back"};
   int startY = 22;
-  int itemHeight = 8;
+  int itemHeight = 7;
   
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < 6; i++) {
     int y = startY + (i * itemHeight);
     
     if (i == menuSelection) {
@@ -1237,11 +1237,11 @@ void drawMusicMenu() {
     display.setCursor(5, y);
     display.print(menuItems[i]);
     
-    if (i == 2 && shuffleMode) {
+    if (i == 3 && shuffleMode) {
       display.setCursor(SCREEN_WIDTH - 15, y);
       display.print("ON");
     }
-    if (i == 3 && repeatMode) {
+    if (i == 4 && repeatMode) {
       display.setCursor(SCREEN_WIDTH - 15, y);
       display.print("ON");
     }
@@ -2167,20 +2167,23 @@ void handleESPNowMenuSelect() {
 
 void handleMusicMenuSelect() {
   switch(menuSelection) {
-    case 0: // Playlist
+    case 0: // Play/Pause
+      togglePlayPause();
+      break;
+    case 1: // Playlist
       playlistSelection = currentTrack - 1;
       changeState(STATE_MUSIC_PLAYLIST);
       break;
-    case 1: // Equalizer
+    case 2: // Equalizer
       changeState(STATE_MUSIC_EQUALIZER);
       break;
-    case 2: // Shuffle
+    case 3: // Shuffle
       toggleShuffle();
       break;
-    case 3: // Repeat
+    case 4: // Repeat
       toggleRepeat();
       break;
-    case 4: // Back
+    case 5: // Back
       menuSelection = 0;
       changeState(STATE_MUSIC_PLAYER);
       break;
@@ -2563,7 +2566,7 @@ void loop() {
           if (playlistSelection < totalTracks - 1) playlistSelection++;
           break;
         case STATE_MUSIC_MENU:
-          if (menuSelection < 4) menuSelection++;
+          if (menuSelection < 5) menuSelection++;
           break;
         case STATE_MUSIC_EQUALIZER:
           if (currentEQ < 5) {
@@ -2796,12 +2799,8 @@ void loop() {
           }
           break;
         case STATE_MUSIC_PLAYER:
-          if (musicPlayerAvailable && totalTracks > 0) {
-            togglePlayPause();
-          } else {
-            menuSelection = 0;
-            changeState(STATE_MAIN_MENU);
-          }
+          menuSelection = 3; // MUSIC
+          changeState(STATE_MAIN_MENU);
           break;
         case STATE_MUSIC_PLAYLIST:
           changeState(STATE_MUSIC_MENU);
