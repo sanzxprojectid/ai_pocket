@@ -294,7 +294,6 @@ const int wifiPerPage = 4;
 
 // ============ SYSTEM VARIABLES ============
 int loadingFrame = 0;
-unsigned long lastLoadingUpdate = 0;
 String chatHistory = "";
 int chatMessageCount = 0;
 
@@ -2488,29 +2487,23 @@ void loop() {
   unsigned long currentMillis = millis();
   
   updateBatteryStatus();
-  
-  if (currentState == STATE_LOADING) {
-    if (currentMillis - lastLoadingUpdate > 150) {
-      lastLoadingUpdate = currentMillis;
-      loadingFrame = (loadingFrame + 1) % 8;
-      showLoadingAnimation();
-    }
-  }
-  
-  if (currentState == STATE_TRIVIA_PLAYING) {
-    static unsigned long lastTriviaUpdate = 0;
-    if (millis() - lastTriviaUpdate > 50) {
-      lastTriviaUpdate = millis();
-      refreshCurrentScreen();
-    }
-  }
 
-  if (currentState == STATE_MUSIC_PLAYER) {
-    static unsigned long lastMusicUpdate = 0;
-    if (millis() - lastMusicUpdate > 50) {
-      lastMusicUpdate = millis();
-      refreshCurrentScreen();
+  // Unified Screen Refresh logic for all states
+  static unsigned long lastScreenUpdate = 0;
+  int refreshInterval = 100; // Default: 10 FPS
+  
+  if (currentState == STATE_MUSIC_PLAYER || currentState == STATE_TRIVIA_PLAYING) {
+    refreshInterval = 50; // 20 FPS for visualizer/scrolling
+  } else if (currentState == STATE_LOADING) {
+    refreshInterval = 150; // Slower for loading animation
+  }
+  
+  if (currentMillis - lastScreenUpdate > refreshInterval) {
+    lastScreenUpdate = currentMillis;
+    if (currentState == STATE_LOADING) {
+      loadingFrame = (loadingFrame + 1) % 8;
     }
+    refreshCurrentScreen();
   }
   
   if (currentMillis - lastDebounce > debounceDelay) {
@@ -2955,6 +2948,7 @@ void loop() {
       delay(30);
       digitalWrite(LED_BUILTIN, LOW);
       refreshCurrentScreen();
+      lastScreenUpdate = millis();
     }
   }
 }
