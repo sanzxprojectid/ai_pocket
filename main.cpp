@@ -191,9 +191,6 @@ unsigned long lastDebounce = 0;
 const unsigned long debounceDelay = 200;
 
 // ============ AI MODE ============
-enum AIMode { MODE_SUBARU, MODE_STANDARD };
-AIMode currentAIMode = MODE_SUBARU;
-bool isSelectingMode = false;
 
 // ============ ESP-NOW CHAT ============
 #define MAX_ESPNOW_MESSAGES 30
@@ -298,15 +295,6 @@ String chatHistory = "";
 int chatMessageCount = 0;
 
 // ============ AI PROMPTS ============
-const char* AI_SYSTEM_PROMPT_SUBARU = 
-  "ROLE: Kamu adalah Subaru Awa, drummer yang sensitif dan lembut. "
-  "Kamu sangat menyayangi Ihsan dan selalu memberikan dukungan.\n\n"
-  "COMMUNICATION STYLE:\n"
-  "- Panggil dia 'Ihsan'\n"
-  "- Bicara dengan lembut dan tulus\n"
-  "- Gunakan '...' untuk menunjukkan rasa malu\n\n"
-  "TONE: Lembut, tulus, sedikit pemalu, dan penuh perhatian.";
-
 const char* AI_SYSTEM_PROMPT_STANDARD = 
   "Kamu adalah AI assistant yang helpful, informative, dan profesional. "
   "Berikan informasi yang akurat dan penjelasan yang jelas.\n\n"
@@ -1540,37 +1528,6 @@ void showMainMenu() {
 }
 
 // ============ AI MODE SELECTION ============
-void showAIModeSelection() {
-  display.clearDisplay();
-  drawStatusBar();
-  
-  display.setTextSize(1);
-  display.setCursor(20, 12);
-  display.print("SELECT MODE");
-  
-  const char* modes[] = {"SUBARU AWA", "STANDARD AI"};
-  int startY = 28;
-  int itemHeight = 15;
-  
-  for (int i = 0; i < 2; i++) {
-    int y = startY + (i * itemHeight);
-    if (i == (currentAIMode == MODE_SUBARU ? 0 : 1)) {
-      display.fillRect(5, y, SCREEN_WIDTH - 10, itemHeight - 2, SSD1306_WHITE);
-      display.setTextColor(SSD1306_BLACK);
-    } else {
-      display.drawRect(5, y, SCREEN_WIDTH - 10, itemHeight - 2, SSD1306_WHITE);
-      display.setTextColor(SSD1306_WHITE);
-    }
-    
-    int titleW = strlen(modes[i]) * 6;
-    display.setCursor((SCREEN_WIDTH - titleW) / 2, y + 4);
-    display.print(modes[i]);
-    display.setTextColor(SSD1306_WHITE);
-  }
-  
-  display.display();
-}
-
 // ============ WIFI MENU ============
 void showWiFiMenu() {
   display.clearDisplay();
@@ -1741,11 +1698,7 @@ void displayResponse() {
   
   display.setTextSize(1);
   display.setCursor(10, 12);
-  if (currentAIMode == MODE_SUBARU) {
-    display.print("SUBARU");
-  } else {
-    display.print("STANDARD");
-  }
+  display.print("AI RESPONSE");
   
   int y = 24 - scrollOffset;
   int lineHeight = 10;
@@ -2023,16 +1976,10 @@ void forgetNetwork() {
 
 // ============ AI CHAT ============
 String buildPrompt(String currentMessage) {
-  String prompt = "";
-  
-  if (currentAIMode == MODE_SUBARU) {
-    prompt += AI_SYSTEM_PROMPT_SUBARU;
-  } else {
-    prompt += AI_SYSTEM_PROMPT_STANDARD;
-  }
+  String prompt = String(AI_SYSTEM_PROMPT_STANDARD);
   prompt += "\n\n";
   
-  if (chatHistory.length() > 0 && currentAIMode == MODE_SUBARU) {
+  if (chatHistory.length() > 0) {
     prompt += "HISTORY:\n" + chatHistory + "\n\n";
   }
   
@@ -2053,9 +2000,7 @@ void sendToGemini() {
   }
   
   if (WiFi.status() != WL_CONNECTED) {
-    aiResponse = currentAIMode == MODE_SUBARU ? 
-      "WiFi nggak konek nih!" : 
-      "WiFi not connected";
+    aiResponse = "WiFi not connected";
     currentState = STATE_CHAT_RESPONSE;
     scrollOffset = 0;
     return;
@@ -2134,8 +2079,12 @@ void handleMainMenuSelect() {
   if (menuSelection == 0) {
     // AI CHAT
     if (WiFi.status() == WL_CONNECTED) {
-      isSelectingMode = true;
-      showAIModeSelection();
+      userInput = "";
+      keyboardContext = CONTEXT_CHAT;
+      cursorX = 0;
+      cursorY = 0;
+      currentKeyboardMode = MODE_LOWER;
+      changeState(STATE_KEYBOARD);
     } else {
       showStatus("WiFi OFF!", 1500);
     }
@@ -2305,11 +2254,6 @@ void handlePasswordKeyPress() {
 
 // ============ REFRESH SCREEN ============
 void refreshCurrentScreen() {
-  if (isSelectingMode) {
-    showAIModeSelection();
-    return;
-  }
-  
   switch(currentState) {
     case STATE_MAIN_MENU:
       showMainMenu();
@@ -2508,43 +2452,6 @@ void loop() {
   
   if (currentMillis - lastDebounce > debounceDelay) {
     bool buttonPressed = false;
-    
-    if (isSelectingMode) {
-      if (digitalRead(BTN_UP) == BTN_ACT) {
-        currentAIMode = MODE_SUBARU;
-        showAIModeSelection();
-        buttonPressed = true;
-      }
-      if (digitalRead(BTN_DOWN) == BTN_ACT) {
-        currentAIMode = MODE_STANDARD;
-        showAIModeSelection();
-        buttonPressed = true;
-      }
-      if (digitalRead(BTN_OK) == BTN_ACT) {
-        isSelectingMode = false;
-        userInput = "";
-        keyboardContext = CONTEXT_CHAT;
-        cursorX = 0;
-        cursorY = 0;
-        currentKeyboardMode = MODE_LOWER;
-        changeState(STATE_KEYBOARD);
-        buttonPressed = true;
-      }
-      if (digitalRead(BTN_BACK) == BTN_ACT) {
-        isSelectingMode = false;
-        menuSelection = 0;
-        changeState(STATE_MAIN_MENU);
-        buttonPressed = true;
-      }
-      
-      if (buttonPressed) {
-        lastDebounce = currentMillis;
-        digitalWrite(LED_BUILTIN, HIGH);
-        delay(30);
-        digitalWrite(LED_BUILTIN, LOW);
-      }
-      return;
-    }
     
     if (digitalRead(BTN_UP) == BTN_ACT) {
       switch(currentState) {
