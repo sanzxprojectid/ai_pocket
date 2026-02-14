@@ -2577,7 +2577,7 @@ void loop() {
   
   updateBatteryStatus();
   
-  if (currentState == STATE_VIDEO_PLAYER && currentMillis - lastVideoFrameUpdate >= 50) {
+  if (currentState == STATE_VIDEO_PLAYER && currentMillis - lastVideoFrameUpdate >= 70) {
     currentVideoFrame++;
     refreshCurrentScreen();
     lastVideoFrameUpdate = currentMillis;
