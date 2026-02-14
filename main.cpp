@@ -9,6 +9,7 @@
 #include <esp_now.h>
 #include <DFRobotDFPlayerMini.h>
 #include "secrets.h"
+#include "videos.h"
 
 // ============ OLED CONFIG ============
 #define SCREEN_WIDTH 128
@@ -79,7 +80,9 @@ enum AppState {
   STATE_TRIVIA_PLAYING,
   STATE_TRIVIA_RESULT,
   STATE_TRIVIA_GAMEOVER,
-  STATE_TRIVIA_LEADERBOARD
+  STATE_TRIVIA_LEADERBOARD,
+  STATE_VIDEO_MENU,
+  STATE_VIDEO_PLAYER
 };
 
 AppState currentState = STATE_BOOT;
@@ -246,6 +249,13 @@ unsigned long lastSpectrumUpdate = 0;
 int currentEQ = 0; // 0=Normal, 1=Pop, 2=Rock, 3=Jazz, 4=Classic, 5=Bass
 
 const char* eqNames[] = {"Normal", "Pop", "Rock", "Jazz", "Classic", "Bass"};
+
+// ============ VIDEO PLAYER VARIABLES ============
+int videoSelection = 0;
+int currentVideoFrame = 0;
+unsigned long lastVideoFrameUpdate = 0;
+int selectedVideoIndex = 0;
+const char* videoNames[] = {"bestfriend", "cute chibi"};
 
 // ============ KEYBOARD LAYOUTS ============
 const char* keyboardLower[3][10] = {
@@ -1539,8 +1549,8 @@ void showMainMenu() {
   display.setCursor(30, 12);
   display.print("MAIN MENU");
   
-  const char* items[] = {"AI CHAT", "WIFI", "ESP-NOW", "MUSIC", "TRIVIA QUIZ", "SYSTEM"};
-  int itemCount = 6;
+  const char* items[] = {"AI CHAT", "WIFI", "ESP-NOW", "MUSIC", "TRIVIA QUIZ", "VIDEO PLAYER", "SYSTEM"};
+  int itemCount = 7;
   
   int startY = 20;
   int itemHeight = 8;
@@ -2196,10 +2206,55 @@ void handleMainMenuSelect() {
       showStatus("Need WiFi!", 1500);
     }
   } else if (menuSelection == 5) {
+    // VIDEO PLAYER
+    menuSelection = 0;
+    changeState(STATE_VIDEO_MENU);
+  } else if (menuSelection == 6) {
     // SYSTEM
     changeState(STATE_SYSTEM_INFO);
   }
 }
+void showVideoMenu() {
+  display.clearDisplay();
+  drawStatusBar();
+
+  display.setTextSize(1);
+  display.setCursor(30, 12);
+  display.print("VIDEO PLAYER");
+
+  int startY = 25;
+  int itemHeight = 12;
+
+  for (int i = 0; i < 2; i++) {
+    int y = startY + (i * itemHeight);
+    if (i == videoSelection) {
+      display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+      display.setTextColor(SSD1306_BLACK);
+    } else {
+      display.setTextColor(SSD1306_WHITE);
+    }
+    display.setCursor(10, y + 2);
+    display.print(videoNames[i]);
+  }
+
+  display.display();
+}
+
+void handleVideoMenuSelect() {
+  selectedVideoIndex = videoSelection;
+  currentVideoFrame = 0;
+  lastVideoFrameUpdate = millis();
+  changeState(STATE_VIDEO_PLAYER);
+}
+
+void drawVideoPlayer() {
+  if (selectedVideoIndex == 0) {
+    drawVideo1(display, currentVideoFrame);
+  } else {
+    drawVideo2(display, currentVideoFrame);
+  }
+}
+
 
 void handleWiFiMenuSelect() {
   switch(menuSelection) {
@@ -2339,6 +2394,12 @@ void refreshCurrentScreen() {
   }
   
   switch(currentState) {
+    case STATE_VIDEO_MENU:
+      showVideoMenu();
+      break;
+    case STATE_VIDEO_PLAYER:
+      drawVideoPlayer();
+      break;
     case STATE_MAIN_MENU:
       showMainMenu();
       break;
@@ -2516,6 +2577,12 @@ void loop() {
   
   updateBatteryStatus();
   
+  if (currentState == STATE_VIDEO_PLAYER && currentMillis - lastVideoFrameUpdate >= 50) {
+    currentVideoFrame++;
+    refreshCurrentScreen();
+    lastVideoFrameUpdate = currentMillis;
+  }
+
   if (currentState == STATE_LOADING) {
     if (currentMillis - lastLoadingUpdate > 150) {
       lastLoadingUpdate = currentMillis;
@@ -2570,6 +2637,9 @@ void loop() {
     
     if (digitalRead(BTN_UP) == BTN_ACT) {
       switch(currentState) {
+        case STATE_VIDEO_MENU:
+          if (videoSelection > 0) videoSelection--;
+          break;
         case STATE_MAIN_MENU:
           if (menuSelection > 0) menuSelection--;
           break;
@@ -2638,8 +2708,11 @@ void loop() {
     
     if (digitalRead(BTN_DOWN) == BTN_ACT) {
       switch(currentState) {
+        case STATE_VIDEO_MENU:
+          if (videoSelection < 1) videoSelection++;
+          break;
         case STATE_MAIN_MENU:
-          if (menuSelection < 5) menuSelection++;
+          if (menuSelection < 6) menuSelection++;
           break;
         case STATE_WIFI_MENU:
           if (menuSelection < 2) menuSelection++;
@@ -2748,6 +2821,9 @@ void loop() {
     
     if (digitalRead(BTN_OK) == BTN_ACT) {
       switch(currentState) {
+        case STATE_VIDEO_MENU:
+          handleVideoMenuSelect();
+          break;
         case STATE_MAIN_MENU:
           handleMainMenuSelect();
           break;
@@ -2855,6 +2931,13 @@ void loop() {
     
     if (digitalRead(BTN_BACK) == BTN_ACT) {
       switch(currentState) {
+        case STATE_VIDEO_MENU:
+          menuSelection = 5;
+          changeState(STATE_MAIN_MENU);
+          break;
+        case STATE_VIDEO_PLAYER:
+          changeState(STATE_VIDEO_MENU);
+          break;
         case STATE_PASSWORD_INPUT:
           changeState(STATE_WIFI_SCAN);
           break;
