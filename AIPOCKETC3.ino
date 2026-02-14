@@ -9,6 +9,7 @@
 #include <esp_now.h>
 #include <DFRobotDFPlayerMini.h>
 #include "secrets.h"
+#include "videos.h"
 
 
 // ============ OLED CONFIG ============
@@ -316,8 +317,6 @@ const char* AI_SYSTEM_PROMPT_STANDARD =
   "TONE: Profesional, informatif, dan membantu.";
 
 // ============ FORWARD DECLARATIONS ============
-void drawVideo1(Adafruit_SSD1306& display, int frame);
-void drawVideo2(Adafruit_SSD1306& display, int frame);
 void changeState(AppState newState);
 void drawStatusBar();
 void showStatus(String message, int delayMs);

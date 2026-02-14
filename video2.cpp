@@ -1,13 +1,12 @@
+#include "videos.h"
 #include <Arduino.h>
-#include <Adafruit_SSD1306.h>
 
 #define FRAME_WIDTH 128
 #define FRAME_HEIGHT 64
 #define FRAME_DELAY 70 // Bisa diubah sesuai kebutuhan
 
 static const byte PROGMEM frames[][FRAME_WIDTH * FRAME_HEIGHT / 8] = {
-// 'frame_000_delay-0', 128x64px
-// USER: Paste your frame data here
+  { 0 } // Dummy frame - replace with your actual frame data
 };
 
 void drawVideo2(Adafruit_SSD1306& display, int frame) {
