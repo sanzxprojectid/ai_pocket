@@ -1,0 +1,20 @@
+void drawStatusBar() {
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  if (musicPlayerAvailable && isPlaying) {
+    display.setCursor(0, 0);
+    display.print("♪");
+  } else {
+    // Pulse animation for "life"
+    if ((millis() / 1000) % 2 == 0) {
+      display.drawPixel(2, 3, SSD1306_WHITE);
+      display.drawPixel(3, 2, SSD1306_WHITE);
+      display.drawPixel(3, 4, SSD1306_WHITE);
+      display.drawPixel(4, 3, SSD1306_WHITE);
+    }
+  }
+
+  drawBatteryIcon(SCREEN_WIDTH - 22, 0);
+
+  if (WiFi.status() == WL_CONNECTED) {

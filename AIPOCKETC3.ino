@@ -1458,6 +1458,14 @@ void drawStatusBar() {
   if (musicPlayerAvailable && isPlaying) {
     display.setCursor(0, 0);
     display.print("♪");
+  } else {
+    // Pulse animation for "life"
+    if ((millis() / 1000) % 2 == 0) {
+      display.drawPixel(2, 3, SSD1306_WHITE);
+      display.drawPixel(3, 2, SSD1306_WHITE);
+      display.drawPixel(3, 4, SSD1306_WHITE);
+      display.drawPixel(4, 3, SSD1306_WHITE);
+    }
   }
   
   drawBatteryIcon(SCREEN_WIDTH - 22, 0);
@@ -1490,7 +1498,6 @@ void drawStatusBar() {
   
   display.drawFastHLine(0, 9, SCREEN_WIDTH, SSD1306_WHITE);
 }
-
 void showStatus(String message, int delayMs) {
   display.clearDisplay();
   display.setTextSize(1);
@@ -1560,8 +1567,13 @@ void showMainMenu() {
   for (int i = 0; i < itemCount; i++) {
     int y = startY + (i * itemHeight);
     if (i == menuSelection) {
-      display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
-      display.setTextColor(SSD1306_BLACK);
+      if ((millis() / 500) % 2 == 0) {
+        display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.drawRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+        display.setTextColor(SSD1306_WHITE);
+      }
     } else {
       display.setTextColor(SSD1306_WHITE);
     }
@@ -1622,11 +1634,10 @@ void showWiFiMenu() {
   
   display.setCursor(5, 22);
   if (WiFi.status() == WL_CONNECTED) {
-    String ssid = WiFi.SSID();
-    if (ssid.length() > 20) ssid = ssid.substring(0, 20);
-    display.print(ssid);
+    display.print("Connected: ");
+    display.print(WiFi.SSID());
   } else {
-    display.print("Not Connected");
+    display.print("Disconnected");
   }
   
   const char* menuItems[] = {"Scan", "Forget", "Back"};
@@ -1636,8 +1647,13 @@ void showWiFiMenu() {
   for (int i = 0; i < 3; i++) {
     int y = startY + (i * itemHeight);
     if (i == menuSelection) {
-      display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
-      display.setTextColor(SSD1306_BLACK);
+      if ((millis() / 500) % 2 == 0) {
+        display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.drawRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+        display.setTextColor(SSD1306_WHITE);
+      }
     } else {
       display.setTextColor(SSD1306_WHITE);
     }
@@ -2226,12 +2242,18 @@ void showVideoMenu() {
 
   int startY = 25;
   int itemHeight = 12;
+  const char* videoNames[] = {"Animation 1", "Animation 2"};
 
   for (int i = 0; i < 2; i++) {
     int y = startY + (i * itemHeight);
     if (i == videoSelection) {
-      display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
-      display.setTextColor(SSD1306_BLACK);
+      if ((millis() / 500) % 2 == 0) {
+        display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+      } else {
+        display.drawRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
+        display.setTextColor(SSD1306_WHITE);
+      }
     } else {
       display.setTextColor(SSD1306_WHITE);
     }
@@ -2589,6 +2611,15 @@ void setup() {
 void loop() {
   unsigned long currentMillis = millis();
   
+  // Periodic refresh to keep UI "alive" (animations, status bar)
+  static unsigned long lastAliveRefresh = 0;
+  if (currentMillis - lastAliveRefresh > 500) {
+    if (currentState != STATE_VIDEO_PLAYER && currentState != STATE_LOADING && currentState != STATE_TRIVIA_PLAYING) {
+      refreshCurrentScreen();
+    }
+    lastAliveRefresh = currentMillis;
+  }
+
   updateBatteryStatus();
   
   if (currentState == STATE_VIDEO_PLAYER) {
