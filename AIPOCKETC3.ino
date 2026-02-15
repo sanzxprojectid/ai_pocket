@@ -1,9 +1,6 @@
-#include <Arduino.h>
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
-#include <WiFi.h>
+#include "globals.h"
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <esp_now.h>
@@ -13,9 +10,6 @@
 
 
 // ============ OLED CONFIG ============
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1
 #define SCREEN_ADDRESS 0x3C
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
@@ -41,7 +35,6 @@ DFRobotDFPlayerMini dfPlayer;
 
 #define BATTERY_MAX 4200
 #define BATTERY_MIN 3000
-#define BATTERY_CRITICAL 3300
 
 // ============ BUTTON PINS ============
 #define BTN_RIGHT  3
@@ -319,7 +312,6 @@ const char* AI_SYSTEM_PROMPT_STANDARD =
 
 // ============ FORWARD DECLARATIONS ============
 void changeState(AppState newState);
-void drawStatusBar();
 void showStatus(String message, int delayMs);
 void scanWiFiNetworks();
 void sendToGemini();
@@ -390,19 +382,6 @@ void updateBatteryStatus() {
   batteryPercent = constrain(batteryPercent, 0, 100);
 }
 
-void drawBatteryIcon(int x, int y) {
-  display.drawRect(x, y, 18, 8, SSD1306_WHITE);
-  display.fillRect(x + 18, y + 2, 2, 4, SSD1306_WHITE);
-  
-  int fillWidth = map(batteryPercent, 0, 100, 0, 16);
-  if (fillWidth > 0) {
-    display.fillRect(x + 1, y + 1, fillWidth, 6, SSD1306_WHITE);
-  }
-  
-  if (batteryVoltage < BATTERY_CRITICAL && (millis() / 500) % 2 == 0) {
-    display.fillRect(x, y, 18, 8, SSD1306_WHITE);
-  }
-}
 
 // ============ TRIVIA QUIZ FUNCTIONS ============
 String urlDecode(String str) {
@@ -1451,44 +1430,6 @@ void sendESPNowMessage(String message) {
 }
 
 // ============ DISPLAY FUNCTIONS ============
-void drawStatusBar() {
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  
-  if (musicPlayerAvailable && isPlaying) {
-    display.setCursor(0, 0);
-    display.print("♪");
-  }
-  
-  drawBatteryIcon(SCREEN_WIDTH - 22, 0);
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    int rssi = WiFi.RSSI();
-    int bars = map(rssi, -100, -50, 1, 4);
-    bars = constrain(bars, 1, 4);
-    for (int i = 0; i < 4; i++) {
-      int h = (i + 1) * 2;
-      if (i < bars) {
-        display.fillRect(85 + (i * 3), 8 - h, 2, h, SSD1306_WHITE);
-      } else {
-        display.drawRect(85 + (i * 3), 8 - h, 2, h, SSD1306_WHITE);
-      }
-    }
-  }
-  
-  if (espnowInitialized) {
-    display.setCursor(65, 0);
-    display.print("E:");
-    display.print(espnowPeerCount);
-  }
-  
-  if (chatMessageCount > 0) {
-    display.setCursor(15, 0);
-    display.print("M:");
-    display.print(chatMessageCount);
-  }
-  
-  display.drawFastHLine(0, 9, SCREEN_WIDTH, SSD1306_WHITE);
 }
 
 void showStatus(String message, int delayMs) {
@@ -1543,40 +1484,6 @@ void showProgressBar(String title, int percent) {
 }
 
 // ============ MAIN MENU ============
-void showMainMenu() {
-  display.clearDisplay();
-  drawStatusBar();
-  
-  display.setTextSize(1);
-  display.setCursor(30, 12);
-  display.print("MAIN MENU");
-  
-  const char* items[] = {"AI CHAT", "WIFI", "ESP-NOW", "MUSIC", "TRIVIA QUIZ", "VIDEO PLAYER", "SYSTEM"};
-  int itemCount = 7;
-  
-  int startY = 20;
-  int itemHeight = 8;
-  
-  for (int i = 0; i < itemCount; i++) {
-    int y = startY + (i * itemHeight);
-    if (i == menuSelection) {
-      display.fillRect(0, y, SCREEN_WIDTH, itemHeight, SSD1306_WHITE);
-      display.setTextColor(SSD1306_BLACK);
-    } else {
-      display.setTextColor(SSD1306_WHITE);
-    }
-    display.setCursor(10, y);
-    display.print(items[i]);
-    
-    if (i == 3 && !musicPlayerAvailable) {
-      display.setCursor(SCREEN_WIDTH - 10, y);
-      display.print("X");
-    }
-    
-    display.setTextColor(SSD1306_WHITE);
-  }
-  
-  display.display();
 }
 
 // ============ AI MODE SELECTION ============
