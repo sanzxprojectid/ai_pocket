@@ -18,3 +18,7 @@ void drawVideo2(Adafruit_SSD1306& display, int frame) {
   display.drawBitmap(0, 0, frames[f], FRAME_WIDTH, FRAME_HEIGHT, SSD1306_WHITE);
   display.display();
 }
+
+int getVideo2Delay() {
+  return FRAME_DELAY;
+}

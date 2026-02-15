@@ -256,7 +256,8 @@ int videoSelection = 0;
 int currentVideoFrame = 0;
 unsigned long lastVideoFrameUpdate = 0;
 int selectedVideoIndex = 0;
-const char* videoNames[] = {"bestfriend", "cute chibi"};
+int currentVideoDelay = 70;
+const char* videoNames[] = {"bestfriend", "cutechibi"};
 
 // ============ KEYBOARD LAYOUTS ============
 const char* keyboardLower[3][10] = {
@@ -2245,6 +2246,7 @@ void handleVideoMenuSelect() {
   selectedVideoIndex = videoSelection;
   currentVideoFrame = 0;
   lastVideoFrameUpdate = millis();
+  currentVideoDelay = (selectedVideoIndex == 0) ? getVideo1Delay() : getVideo2Delay();
 
   if (musicPlayerAvailable) {
     if (selectedVideoIndex == 0) {
@@ -2589,10 +2591,18 @@ void loop() {
   
   updateBatteryStatus();
   
-  if (currentState == STATE_VIDEO_PLAYER && currentMillis - lastVideoFrameUpdate >= 70) {
-    currentVideoFrame++;
-    refreshCurrentScreen();
-    lastVideoFrameUpdate = currentMillis;
+  if (currentState == STATE_VIDEO_PLAYER) {
+    if (currentMillis - lastVideoFrameUpdate >= currentVideoDelay) {
+      currentVideoFrame++;
+      refreshCurrentScreen();
+      lastVideoFrameUpdate = currentMillis;
+    }
+
+    if (musicPlayerAvailable && digitalRead(DFPLAYER_BUSY) == HIGH) {
+      if (selectedVideoIndex == 0) dfPlayer.play(100);
+      else if (selectedVideoIndex == 1) dfPlayer.play(101);
+      isPlaying = true;
+    }
   }
 
   if (currentState == STATE_LOADING) {
