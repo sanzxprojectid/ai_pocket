@@ -2519,6 +2519,14 @@ void loop() {
       showLoadingAnimation();
     }
   }
+  // Periodic UI refresh to keep the display alive (e.g. for animations or battery status)
+  static unsigned long lastUIRefresh = 0;
+  if (currentMillis - lastUIRefresh >= 500) {
+    if (currentState != STATE_VIDEO_PLAYER && currentState != STATE_LOADING && currentState != STATE_TRIVIA_PLAYING) {
+      refreshCurrentScreen();
+    }
+    lastUIRefresh = currentMillis;
+  }
   
   if (currentState == STATE_TRIVIA_PLAYING) {
     refreshCurrentScreen();
