@@ -2245,6 +2245,17 @@ void handleVideoMenuSelect() {
   selectedVideoIndex = videoSelection;
   currentVideoFrame = 0;
   lastVideoFrameUpdate = millis();
+
+  if (musicPlayerAvailable) {
+    if (selectedVideoIndex == 0) {
+      dfPlayer.play(100);
+      isPlaying = true;
+    } else if (selectedVideoIndex == 1) {
+      dfPlayer.play(101);
+      isPlaying = true;
+    }
+  }
+
   changeState(STATE_VIDEO_PLAYER);
 }
 
@@ -2937,6 +2948,10 @@ void loop() {
           changeState(STATE_MAIN_MENU);
           break;
         case STATE_VIDEO_PLAYER:
+          if (musicPlayerAvailable) {
+            dfPlayer.pause();
+            isPlaying = false;
+          }
           changeState(STATE_VIDEO_MENU);
           break;
         case STATE_PASSWORD_INPUT:
