@@ -1,5 +1,7 @@
-#include "videos.h"
 #include <Arduino.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "videos.h"
 
 #define FRAME_WIDTH 128
 #define FRAME_HEIGHT 64
